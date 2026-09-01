@@ -5,8 +5,11 @@ Design constraints that shaped this:
 * Everything is driven by `dt` (seconds), never by frame count — effects must look
   identical at 15 fps on a struggling laptop and 60 fps on a desktop.
 * No full-frame alpha compositing. Opaque OpenCV primitives are drawn directly on the
-  frame; only sprites (the thumbs emoji) alpha-blend, and only inside their ROI.
-  A full-frame float blend at 720p costs ~10-15 ms/frame in numpy — too much.
+  frame; only emoji sprites alpha-blend, and only inside their ROI. A full-frame float
+  blend at 720p costs ~10-15 ms/frame in numpy — too much.
+* Sprites arrive from SpriteSet already premultiplied and already scaled to a cached
+  size bucket; `blend_sprite` only composites. Every effect falls back to its
+  procedural primitive when a sprite is missing, so gestcam works with no assets.
 * Each effect owns its RNG so `demo` renders are reproducible.
 """
 
@@ -18,6 +21,8 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+from .sprites import SpriteSet
 
 BGR = tuple[int, int, int]
 
@@ -57,14 +62,17 @@ def _rot_rect(cx: float, cy: float, w: float, h: float, ang: float) -> np.ndarra
     return (corners @ rot.T + (cx, cy)).astype(np.int32)
 
 
-def blend_sprite(frame: np.ndarray, sprite_rgba: np.ndarray, cx: float, cy: float,
-                 size_px: float, alpha: float = 1.0) -> None:
-    """Alpha-blend an RGBA sprite centred on (cx, cy), scaled to `size_px`, in place."""
-    if size_px < 2 or alpha <= 0:
+def blend_sprite(frame: np.ndarray, spr: np.ndarray, cx: float, cy: float,
+                 alpha: float = 1.0) -> None:
+    """Blend a PREMULTIPLIED, already-scaled BGRA sprite centred on (cx, cy), in place.
+
+    Only SpriteSet produces valid input: a straight-alpha sprite blended here shows a
+    dark halo. Premultiplied means the composite is `frame*(1-a) + rgb`, so `alpha`
+    scales both terms rather than only the source.
+    """
+    if alpha <= 0:
         return
-    s = int(size_px)
-    interp = cv2.INTER_AREA if s < sprite_rgba.shape[0] else cv2.INTER_LINEAR
-    spr = cv2.resize(sprite_rgba, (s, s), interpolation=interp)
+    s = spr.shape[0]
     H, W = frame.shape[:2]
     x0, y0 = int(cx - s / 2), int(cy - s / 2)
     x1, y1 = x0 + s, y0 + s
@@ -74,16 +82,17 @@ def blend_sprite(frame: np.ndarray, sprite_rgba: np.ndarray, cx: float, cy: floa
     if x1 <= x0 or y1 <= y0:
         return
     spr = spr[sy0:sy0 + (y1 - y0), sx0:sx0 + (x1 - x0)]
-    a = (spr[:, :, 3:4].astype(np.float32) / 255.0) * alpha
+    a = spr[:, :, 3:4].astype(np.float32) * (np.float32(alpha) / 255.0)
     roi = frame[y0:y1, x0:x1].astype(np.float32)
-    frame[y0:y1, x0:x1] = (roi * (1 - a) + spr[:, :, :3].astype(np.float32) * a).astype(np.uint8)
+    frame[y0:y1, x0:x1] = (roi * (1 - a) + spr[:, :, :3].astype(np.float32) * np.float32(alpha)).astype(np.uint8)
 
 
 class Effect:
     """Base: subclasses implement update(dt) and draw(frame); set self.alive = False when done."""
 
-    def __init__(self, w: int, h: int, seed: int | None = None):
+    def __init__(self, w: int, h: int, sprites=None, seed: int | None = None):
         self.w, self.h = w, h
+        self.sprites = sprites
         self.t = 0.0
         self.alive = True
         self.rng = random.Random(seed)
@@ -99,8 +108,8 @@ class Effect:
 class Hearts(Effect):
     duration = 3.2
 
-    def __init__(self, w, h, anchors=None, seed=None):
-        super().__init__(w, h, seed)
+    def __init__(self, w, h, sprites=None, anchors=None, seed=None):
+        super().__init__(w, h, sprites, seed)
         cx = self.w * 0.5
         cy = self.h * 0.55
         if anchors:
@@ -142,8 +151,8 @@ class Hearts(Effect):
 class Balloons(Effect):
     duration = 4.5
 
-    def __init__(self, w, h, anchors=None, seed=None):
-        super().__init__(w, h, seed)
+    def __init__(self, w, h, sprites=None, anchors=None, seed=None):
+        super().__init__(w, h, sprites, seed)
         self.parts = []
         for i in range(10):
             r = self.rng.uniform(0.045, 0.07) * self.h
@@ -182,8 +191,8 @@ class Balloons(Effect):
 class Confetti(Effect):
     duration = 4.0
 
-    def __init__(self, w, h, anchors=None, seed=None):
-        super().__init__(w, h, seed)
+    def __init__(self, w, h, sprites=None, anchors=None, seed=None):
+        super().__init__(w, h, sprites, seed)
         self.parts = []
         for i in range(200):
             self.parts.append(dict(
@@ -221,8 +230,8 @@ class Confetti(Effect):
 class Rain(Effect):
     duration = 3.5
 
-    def __init__(self, w, h, anchors=None, seed=None):
-        super().__init__(w, h, seed)
+    def __init__(self, w, h, sprites=None, anchors=None, seed=None):
+        super().__init__(w, h, sprites, seed)
         self.drops = [dict(
             x=self.rng.uniform(0, 1) * self.w,
             y=self.rng.uniform(-1, 0) * self.h,
@@ -262,8 +271,8 @@ class Rain(Effect):
 class Fireworks(Effect):
     duration = 3.2
 
-    def __init__(self, w, h, anchors=None, seed=None):
-        super().__init__(w, h, seed)
+    def __init__(self, w, h, sprites=None, anchors=None, seed=None):
+        super().__init__(w, h, sprites, seed)
         self.bursts = []
         for i in range(5):
             self.bursts.append(dict(
@@ -313,8 +322,8 @@ class Fireworks(Effect):
 class Lasers(Effect):
     duration = 2.6
 
-    def __init__(self, w, h, anchors=None, seed=None):
-        super().__init__(w, h, seed)
+    def __init__(self, w, h, sprites=None, anchors=None, seed=None):
+        super().__init__(w, h, sprites, seed)
         self.origins = list(anchors) if anchors else [(w * 0.3, h * 0.55), (w * 0.7, h * 0.55)]
         self.beams = [self.rng.uniform(0, 6.283) for _ in range(9)]
         self.spin = self.rng.choice([-1, 1]) * 0.9
@@ -341,9 +350,8 @@ class Lasers(Effect):
 class Thumb(Effect):
     duration = 2.4
 
-    def __init__(self, w, h, sprite: np.ndarray | None, up: bool = True, anchors=None, seed=None):
-        super().__init__(w, h, seed)
-        self.sprite = sprite
+    def __init__(self, w, h, sprites=None, up: bool = True, anchors=None, seed=None):
+        super().__init__(w, h, sprites, seed)
         self.up = up
         if anchors:
             ax, ay = anchors[0]
@@ -361,8 +369,9 @@ class Thumb(Effect):
         fade = 1.0 if self.t < self.duration - 0.45 else max(0.0, (self.duration - self.t) / 0.45)
         size = self.h * 0.36 * pop
         y = self.y - 0.05 * self.h * self.t
-        if self.sprite is not None:
-            blend_sprite(frame, self.sprite, self.x, y, size, fade)
+        spr = self.sprites.get("thumbs_up" if self.up else "thumbs_down", size) if self.sprites else None
+        if spr is not None:
+            blend_sprite(frame, spr, self.x, y, fade)
         else:  # procedural fallback: white bubble with a colour disc
             r = int(size / 2)
             if r > 1 and fade > 0:
@@ -380,9 +389,10 @@ class HoldRing:
 
 
 class EffectEngine:
-    def __init__(self, w: int, h: int, sprites: dict[str, np.ndarray] | None = None, seed: int | None = None):
+    def __init__(self, w: int, h: int, sprites=None, seed: int | None = None):
         self.w, self.h = w, h
-        self.sprites = sprites or {}
+        # Accept a raw dict too: demo and the tests build one by hand.
+        self.sprites = sprites if isinstance(sprites, SpriteSet) else SpriteSet(sprites or {})
         self.active: list[Effect] = []
         self.seed = seed
         self._n = 0
@@ -394,19 +404,15 @@ class EffectEngine:
         self._n += 1
         seed = None if self.seed is None else self.seed + self._n
         w, h = self.w, self.h
-        mk = {
-            "hearts": lambda: Hearts(w, h, anchors, seed),
-            "balloons": lambda: Balloons(w, h, anchors, seed),
-            "confetti": lambda: Confetti(w, h, anchors, seed),
-            "rain": lambda: Rain(w, h, anchors, seed),
-            "fireworks": lambda: Fireworks(w, h, anchors, seed),
-            "lasers": lambda: Lasers(w, h, anchors, seed),
-            "thumbs_up": lambda: Thumb(w, h, self.sprites.get("thumbs_up"), True, anchors, seed),
-            "thumbs_down": lambda: Thumb(w, h, self.sprites.get("thumbs_down"), False, anchors, seed),
-        }
-        if reaction not in mk:
+        mk = {"hearts": Hearts, "balloons": Balloons, "confetti": Confetti,
+              "rain": Rain, "fireworks": Fireworks, "lasers": Lasers}
+        cls = mk.get(reaction)
+        if cls is not None:
+            self.active.append(cls(w, h, self.sprites, anchors, seed))
+        elif reaction in ("thumbs_up", "thumbs_down"):
+            self.active.append(Thumb(w, h, self.sprites, reaction == "thumbs_up", anchors, seed))
+        else:
             raise ValueError(f"unknown reaction {reaction!r}")
-        self.active.append(mk[reaction]())
 
     def step(self, frame: np.ndarray, dt: float, hold: HoldRing | None = None) -> None:
         dt = max(0.0, min(dt, 0.1))  # clamp: a 2 s stall shouldn't teleport particles
