@@ -57,4 +57,4 @@ Flags worth knowing: `--hold 0.7` `--cooldown 2.5` `--min-score 0.5` `--mirror` 
 
 ## Credits
 
-Gesture model: MediaPipe Tasks (Apache-2.0). Thumbs sprites: Noto Color Emoji (Apache-2.0).
+Gesture model: MediaPipe Tasks (Apache-2.0). Emoji sprites: Noto Color Emoji (Apache-2.0), vendored in `gestcam/assets/`.
