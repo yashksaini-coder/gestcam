@@ -175,15 +175,18 @@ def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
     # adjacent hands still over-fire.
     if len(hands) >= 2 and _d(hands[0].lm[WRIST], hands[1].lm[WRIST], hands[0].aspect) > max(hands[0].size, hands[1].size):
         a, b = hands[0], hands[1]
-        if is_heart(a, b):
-            return "hearts"
         la, lb = lab(a), lab(b)
+        # Canned labels first: let the trained classifier arbitrate where it has an
+        # opinion. Geometry only decides the two poses it has no class for. Running
+        # is_heart ahead of these made two adjacent Victory hands read as "hearts".
         if la == lb == "Thumb_Up":
             return "fireworks"
         if la == lb == "Thumb_Down":
             return "rain"
         if la == lb == "Victory":
             return "confetti"
+        if is_heart(a, b):
+            return "hearts"
         if a.is_horns() and b.is_horns():
             return "lasers"
 
