@@ -188,6 +188,12 @@ class Balloons(Effect):
             # string
             pts = np.array([[x, y + int(r * 1.15)], [x + int(sway * r * 0.4), y + int(r * 2.1)], [x - int(sway * r * 0.3), y + int(r * 3.0)]], np.int32)
             cv2.polylines(frame, [pts], False, (70, 70, 70), 1, cv2.LINE_AA)
+            # 2.2r matches the emoji to the ellipse it replaces; tunable in demo. The
+            # string stays procedural either way — no emoji carries a swaying string.
+            spr = self.sprites.get("balloons", r * 2.2) if self.sprites else None
+            if spr is not None:
+                blend_sprite(frame, spr, x, y, 1.0)
+                continue
             # knot
             cv2.fillConvexPoly(frame, np.array([[x - r // 6, y + int(r * 1.2)], [x + r // 6, y + int(r * 1.2)], [x, y + int(r * 1.0)]], np.int32), p["col"], cv2.LINE_AA)
             # body + highlight
