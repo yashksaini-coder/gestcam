@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from .effects import EffectEngine, HoldRing
-from .recognizer import GestureRecognizer, Observation, ensure_model, reaction_for
+from .recognizer import GestureRecognizer, ensure_model, pick
 from .state import ReactionState
 
 
@@ -66,12 +66,9 @@ class Stats:
         self.loop_ms.clear()
 
 
-def anchors_px(obs: Observation, w: int, h: int) -> list[tuple[float, float]]:
-    out = []
-    for hd in obs.hands:
-        x, y = hd.palm_center()
-        out.append((x * w, y * h))
-    return out
+def anchors_px(hands, w: int, h: int) -> list[tuple[float, float]]:
+    """Palm centres of the hands the rule actually used, in pixels."""
+    return [(x * w, y * h) for x, y in (hd.palm_center() for hd in hands)]
 
 
 def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None:
@@ -117,8 +114,8 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
             candidate = None
             anchors: list[tuple[float, float]] = []
             if obs is not None and now - obs.ts <= cfg.stale_s:
-                candidate = reaction_for(obs.hands, cfg.min_score)
-                anchors = anchors_px(obs, cap.width, cap.height)
+                candidate, used = pick(obs.hands, cfg.min_score)
+                anchors = anchors_px(used, cap.width, cap.height)
                 if obs.ts != last_obs_ts and obs.infer_ms:
                     stats.infer_ms.append(obs.infer_ms)
                     last_obs_ts = obs.ts
