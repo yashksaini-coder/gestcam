@@ -125,6 +125,7 @@ class Hearts(Effect):
                 delay=self.rng.uniform(0, 1.2),
                 phase=self.rng.uniform(0, 6.28),
                 col=(60, 60, 235) if self.rng.random() < 0.6 else (150, 120, 255),
+                emoji=self.rng.choice(("hearts", "heart_sparkle", "heart_purple")),
             ))
 
     def update(self, dt):
@@ -143,6 +144,13 @@ class Hearts(Effect):
             life = self.duration - p["delay"]
             k = 1.0 - max(0.0, (age - life * 0.7) / (life * 0.3 + 1e-6))  # shrink at the end
             k = max(0.0, k) * (1.0 + 0.08 * math.sin(age * 8 + p["phase"]))
+            # 1.8: HEART's unit half-extent is ~0.94, so its full width is ~1.88*size —
+            # this matches the emoji to the polygon it replaces. The min() is a cost cap,
+            # tunable in `gestcam demo --preview`.
+            spr = self.sprites.get(p["emoji"], min(p["size"] * k * 1.8, self.h * 0.13)) if self.sprites else None
+            if spr is not None:
+                blend_sprite(frame, spr, p["x"], p["y"], 1.0)
+                continue
             pts = (HEART * (p["size"] * k) + (p["x"], p["y"])).astype(np.int32)
             cv2.fillPoly(frame, [pts], p["col"], lineType=cv2.LINE_AA)
 
