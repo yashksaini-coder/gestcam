@@ -24,10 +24,22 @@ uv run gestcam doctor         # read this before anything else
 ## One-time: virtual camera device
 
 ```sh
-./scripts/loopback.sh         # installs v4l2loopback-dkms + headers, loads with exclusive_caps=1, persists
+./scripts/loopback.sh         # installs v4l2loopback-dkms + headers, loads TWO devices, persists
 ```
 
-`exclusive_caps=1` is not optional: Chromium-based apps (Omarchy's Discord web app, Chrome, Electron) hide loopback devices without it.
+You get **GestCam** on `/dev/video10` and **GestCam2** on `/dev/video11`. gestcam
+publishes identical frames to both.
+
+Two devices, because **one v4l2loopback device serves exactly one streaming consumer.**
+The second app to start gets `Device or resource busy` (`VIDIOC_REQBUFS` → `EBUSY`) and
+shows black — `open()` succeeds, which is why it looks like the app "can't see" the
+camera when it is listed the whole time. So: point the native Discord app at GestCam and
+Discord in your browser at GestCam2. Need a third app? Add a third `video_nr`/label to
+`MODOPTS` in `scripts/loopback.sh`.
+
+`exclusive_caps=1` is not optional either: Chromium-based apps (Discord web, Chrome,
+Electron) hide loopback devices without it. It is a **per-device array** — a bare
+`exclusive_caps=1` with two devices silently leaves the second one invisible.
 
 ## Run
 
@@ -38,7 +50,13 @@ uv run gestcam run --preview           # + local window (XWayland)
 uv run gestcam run --width 640 --height 480 --infer-every 2   # slow machine
 ```
 
-Then in Discord → Voice & Video → Camera → **GestCam**. Check without Discord: `mpv av://v4l2:/dev/video10`.
+Then in Discord → Voice & Video → Camera → **GestCam** (or **GestCam2** if something else
+already holds the first). Discord remembers the choice, so it is a one-time pick per app.
+Check without Discord: `mpv av://v4l2:/dev/video10`.
+
+There is no way to layer reactions onto a camera an app has *already* selected — that
+would need an OS-level camera-effects layer, which is exactly what macOS has and Linux
+does not. Selecting GestCam once per app is the whole of the workaround.
 
 Flags worth knowing: `--hold 0.7` `--cooldown 2.5` `--min-score 0.5` `--mirror` `--record out.mp4` `--out none` (preview only).
 
@@ -47,6 +65,8 @@ Flags worth knowing: `--hold 0.7` `--cooldown 2.5` `--min-score 0.5` `--mirror` 
 | Symptom | Cause / fix |
 |---|---|
 | Discord doesn't list GestCam | module loaded without `exclusive_caps=1`; or gestcam isn't running (loopback only advertises capture once a producer is attached). Also try disabling `chrome://flags/#enable-webrtc-pipewire-camera` if it's on. |
+| Camera works in one app, black in another | both are fighting for the same device — one loopback serves one consumer. Point the second app at **GestCam2**. `uv run gestcam doctor` names the process holding each device. |
+| Discord in the browser shows black while the app works | same thing: the native app has `/dev/video10`. Use GestCam2 in the browser. |
 | `modprobe: FATAL: Module v4l2loopback not found` | headers missing for the running kernel → `pacman -S linux-headers`, `dkms autoinstall`, reboot. Happens after every kernel update until dkms rebuilds. |
 | Module refuses to load, Secure Boot on | unsigned DKMS module. Sign it or disable Secure Boot. |
 | Webcam gives 5 fps at 720p | camera stuck in YUYV. gestcam requests MJPG; check `v4l2-ctl -d /dev/video0 --list-formats-ext`. |
