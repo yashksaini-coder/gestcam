@@ -445,6 +445,7 @@ class HoldRing:
     x: float
     y: float
     progress: float
+    reaction: str | None = None   # which reaction is pending, for the preview glyph
 
 
 class EffectEngine:
@@ -489,6 +490,11 @@ class EffectEngine:
             # Dark track first so the white arc reads against a bright background.
             cv2.ellipse(frame, (cx, cy), (r, r), -90, 0, 360, (40, 40, 40), 5, cv2.LINE_AA)
             cv2.ellipse(frame, (cx, cy), (r, r), -90, 0, int(360 * hold.progress), (255, 255, 255), 3, cv2.LINE_AA)
+            # The glyph fades up with the hold, so it reads as "this is what's coming"
+            # rather than as a static badge — and a misread can be abandoned early.
+            spr = self.sprites.get(hold.reaction, r * 1.4) if hold.reaction else None
+            if spr is not None:
+                blend_sprite(frame, spr, cx, cy, 0.35 + 0.65 * hold.progress)
 
     @property
     def busy(self) -> bool:
