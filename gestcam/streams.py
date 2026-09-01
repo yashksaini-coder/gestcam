@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -103,6 +104,31 @@ class VirtualCamOutput:
 
     def close(self):
         self.cam.close()
+
+
+def gestcam_devices(prefix: str = "GestCam") -> list[str]:
+    """Every loopback device we should publish to, in /dev/videoN order.
+
+    One v4l2loopback device serves exactly ONE streaming consumer: 0.15.4's
+    vidioc_reqbufs returns -EBUSY to the second capture client, and max_openers=10
+    gates open() only — so the second app opens the device and then goes black. That
+    is the most confusing symptom in this project; don't make anyone re-derive it.
+    The fix is N devices, each claimed by one app, all fed the same frames.
+
+    Discovery by sysfs name rather than a hardcoded 10,11: a user who changed
+    MODOPTS would otherwise publish to one device and wonder why the second app is
+    black. `prefix` is the knob — an unrelated loopback named "GestCam…" would also
+    be written to, which is the intended trade.
+    """
+    out = []
+    for p in sorted(Path("/sys/class/video4linux").glob("video*"),
+                    key=lambda q: int(q.name[5:] or 0)):
+        try:
+            if (p / "name").read_text().startswith(prefix):
+                out.append(f"/dev/{p.name}")
+        except OSError:
+            pass          # device vanished mid-scan, or no name attribute
+    return out
 
 
 class PreviewOutput:
