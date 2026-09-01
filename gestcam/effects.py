@@ -317,6 +317,7 @@ class Fireworks(Effect):
         self.bursts = []
         for i in range(5):
             self.bursts.append(dict(
+                emoji=self.rng.choice(("fireworks", "sparkler", "firecracker")),
                 t0=i * 0.45 + self.rng.uniform(0, 0.2),
                 x=self.rng.uniform(0.15, 0.85) * self.w,
                 y=self.rng.uniform(0.12, 0.5) * self.h,
@@ -355,8 +356,15 @@ class Fireworks(Effect):
                 tx, ty = p["hist"][0] if p["hist"] else (p["x"], p["y"])
                 cv2.line(frame, (int(b["x"] + tx), int(b["y"] + ty)), (x, y), col, rad, cv2.LINE_AA)
                 cv2.circle(frame, (x, y), rad, (255, 255, 255) if age < 0.5 else col, -1, cv2.LINE_AA)
-            if age < 0.12:
-                cv2.circle(frame, (int(b["x"]), int(b["y"])), int(self.h * 0.06 * (1 - age / 0.12)), (255, 255, 255), -1, cv2.LINE_AA)
+            # 0.16*h is the knob. The elif preserves the old behaviour exactly on the
+            # no-sprite path: it is only reachable when spr is None and age < 0.5.
+            if age < 0.5:
+                pop = min(1.0, age / 0.12)
+                spr = self.sprites.get(b["emoji"], self.h * 0.16 * pop) if self.sprites else None
+                if spr is not None:
+                    blend_sprite(frame, spr, b["x"], b["y"], max(0.0, 1.0 - age / 0.5))
+                elif age < 0.12:
+                    cv2.circle(frame, (int(b["x"]), int(b["y"])), int(self.h * 0.06 * (1 - age / 0.12)), (255, 255, 255), -1, cv2.LINE_AA)
 
 
 # --------------------------------------------------------------------------- lasers
