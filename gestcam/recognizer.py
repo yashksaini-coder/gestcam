@@ -5,8 +5,9 @@ Two layers, deliberately separated so the second is unit-testable without a mode
 1. `GestureRecognizer`: thin wrapper around MediaPipe Tasks GestureRecognizer in
    LIVE_STREAM mode. Inference runs on MediaPipe's own thread; we only ever read the
    *latest* result. The capture/compose loop never blocks on the model.
-2. `reaction_for(hands)`: pure function. Takes per-hand canned labels + landmarks,
-   returns one of REACTIONS or None. Two-hand reactions win over single-hand ones.
+2. `pick(hands)`: pure function. Takes per-hand canned labels + landmarks, returns one
+   of REACTIONS (or None) *and* the hands that decided it, so effects can anchor on the
+   hand that actually fired. `reaction_for` is the reaction-only adapter.
 """
 
 from __future__ import annotations
@@ -155,15 +156,19 @@ def is_heart(a: Hand, b: Hand, tol: float = 0.55) -> bool:
     return thumb_y - index_y > 0.30 * size  # image y grows downward
 
 
-def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
-    """Map the hands seen in one frame to a reaction candidate (or None).
+def pick(hands: list[Hand], min_score: float = 0.5) -> tuple[str | None, list[Hand]]:
+    """Map the hands seen in one frame to (reaction candidate, the hands that decided it).
 
     Precedence: two-hand reactions > single-hand. Hands whose canned label is below
     `min_score` are treated as "None" for canned rules but still usable for the
     landmark rules (heart, horns), which don't depend on the classifier.
+
+    The second element is what effects anchor on. Only this function knows which hand
+    matched; returning every detected hand instead would pin a sprite over whichever
+    hand MediaPipe happened to list first.
     """
     if not hands:
-        return None
+        return None, []
 
     def lab(h: Hand) -> str:
         return h.label if h.score >= min_score else "None"
@@ -180,22 +185,27 @@ def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
         # opinion. Geometry only decides the two poses it has no class for. Running
         # is_heart ahead of these made two adjacent Victory hands read as "hearts".
         if la == lb == "Thumb_Up":
-            return "fireworks"
+            return "fireworks", [a, b]
         if la == lb == "Thumb_Down":
-            return "rain"
+            return "rain", [a, b]
         if la == lb == "Victory":
-            return "confetti"
+            return "confetti", [a, b]
         if is_heart(a, b):
-            return "hearts"
+            return "hearts", [a, b]
         if a.is_horns() and b.is_horns():
-            return "lasers"
+            return "lasers", [a, b]
 
     single = {"Thumb_Up": "thumbs_up", "Thumb_Down": "thumbs_down", "Victory": "balloons"}
     # Rank only hands whose label maps to something. Hand.score is the score of the top
     # canned class, and for a resting hand that class is "None" at 0.9+ — which would
     # outrank a deliberate Thumb_Up@0.7 and swallow the whole frame.
     best = max((h for h in hands if lab(h) in single), key=lambda h: h.score, default=None)
-    return single[best.label] if best is not None else None
+    return (single[best.label], [best]) if best is not None else (None, [])
+
+
+def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
+    """Just the reaction. Kept so the pure-rule tests need no plumbing."""
+    return pick(hands, min_score)[0]
 
 
 class GestureRecognizer:
