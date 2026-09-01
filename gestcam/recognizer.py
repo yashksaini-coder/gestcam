@@ -134,15 +134,25 @@ class Observation:
 
 
 def is_heart(a: Hand, b: Hand, tol: float = 0.55) -> bool:
-    """Two-hand heart: index tips touching, thumb tips touching, index tips above thumbs."""
+    """Two-hand heart: index tips touching, thumb tips touching, and the index junction
+    at least a third of a palm above the thumb junction.
+
+    The tip tolerances are divided by palm size, so a heart at arm's length and one at
+    30 cm normalise identically. The vertical test is the one that used to be fragile:
+    a bare `index_y < thumb_y` passes on a single pixel, which two hands merely resting
+    near each other satisfy. Requiring real extent survives ~±30° of roll instead.
+
+    If hearts still false-fires on camera, raise the two-hand wrist floor in
+    reaction_for rather than adding a second floor here — one floor, one constant.
+    """
     size = 0.5 * (a.size + b.size)
-    idx = np.linalg.norm(a.lm[INDEX_TIP] - b.lm[INDEX_TIP]) / size
-    thb = np.linalg.norm(a.lm[THUMB_TIP] - b.lm[THUMB_TIP]) / size
+    idx = _d(a.lm[INDEX_TIP], b.lm[INDEX_TIP], a.aspect) / size
+    thb = _d(a.lm[THUMB_TIP], b.lm[THUMB_TIP], a.aspect) / size
     if idx > tol or thb > tol * 1.3:
         return False
     index_y = 0.5 * (a.lm[INDEX_TIP][1] + b.lm[INDEX_TIP][1])
     thumb_y = 0.5 * (a.lm[THUMB_TIP][1] + b.lm[THUMB_TIP][1])
-    return index_y < thumb_y  # image y grows downward → index tips visually above thumbs
+    return thumb_y - index_y > 0.30 * size  # image y grows downward
 
 
 def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
