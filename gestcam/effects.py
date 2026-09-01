@@ -292,9 +292,16 @@ class Rain(Effect):
         if fade > 0:
             cv2.addWeighted(frame, 1 - 0.3 * fade, frame, 0, 0, dst=frame)
         cy_off = int(-0.12 * self.h * (1 - fade))
-        for (x, y, r) in self.cloud:
-            cv2.circle(frame, (x, y + cy_off), r, (120, 120, 125), -1, cv2.LINE_AA)
-            cv2.circle(frame, (x, y + cy_off - r // 4), int(r * 0.85), (150, 150, 155), -1, cv2.LINE_AA)
+        # 0.24*h and the +0.06*h nudge are the two knobs here. self.cloud (8 puffs) is
+        # kept solely for the no-sprite path — don't delete it.
+        spr = self.sprites.get("rain", self.h * 0.24) if self.sprites else None
+        if spr is not None:
+            for fx in (0.2, 0.5, 0.8):
+                blend_sprite(frame, spr, fx * self.w, cy_off + self.h * 0.06, 1.0)
+        else:
+            for (x, y, r) in self.cloud:
+                cv2.circle(frame, (x, y + cy_off), r, (120, 120, 125), -1, cv2.LINE_AA)
+                cv2.circle(frame, (x, y + cy_off - r // 4), int(r * 0.85), (150, 150, 155), -1, cv2.LINE_AA)
         if self.t > 0.3:
             for d in self.drops:
                 x, y = int(d["x"]), int(d["y"])
