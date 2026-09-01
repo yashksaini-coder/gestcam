@@ -437,7 +437,11 @@ class Thumb(Effect):
 # --------------------------------------------------------------------------- engine
 @dataclass
 class HoldRing:
-    """Small progress arc showing 'keep holding' feedback near the hands."""
+    """Small progress arc showing 'keep holding' feedback near the hands.
+
+    x/y are a hint: the ring is clamped into frame at draw time, because raised hands
+    routinely put it off the top edge.
+    """
     x: float
     y: float
     progress: float
@@ -478,7 +482,13 @@ class EffectEngine:
             e.draw(frame)
         if hold and 0.05 < hold.progress < 1.0:
             r = int(self.h * 0.03)
-            cv2.ellipse(frame, (int(hold.x), int(hold.y)), (r, r), -90, 0, int(360 * hold.progress), (255, 255, 255), 3, cv2.LINE_AA)
+            # Clamp here, not in the caller: raised hands put the ring above y=0 and
+            # cv2.ellipse clips it silently — no feedback exactly while holding.
+            cx = int(min(max(hold.x, r + 4), self.w - r - 4))
+            cy = int(min(max(hold.y, r + 4), self.h - r - 4))
+            # Dark track first so the white arc reads against a bright background.
+            cv2.ellipse(frame, (cx, cy), (r, r), -90, 0, 360, (40, 40, 40), 5, cv2.LINE_AA)
+            cv2.ellipse(frame, (cx, cy), (r, r), -90, 0, int(360 * hold.progress), (255, 255, 255), 3, cv2.LINE_AA)
 
     @property
     def busy(self) -> bool:
