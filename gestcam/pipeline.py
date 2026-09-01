@@ -140,7 +140,9 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
                 # during fast movement; the hand is stationary by definition while held.
                 ring = (ax, ay) if ring is None else (0.7 * ring[0] + 0.3 * ax,
                                                       0.7 * ring[1] + 0.3 * ay)
-                hold = HoldRing(ring[0], ring[1], state.progress(now))
+                # The glyph previews what will fire, so a misread can be abandoned
+                # before the 2.5 s cooldown locks it in.
+                hold = HoldRing(ring[0], ring[1], state.progress(now), state.current)
             else:
                 ring = None
             engine.step(frame, now - last_t, hold)
