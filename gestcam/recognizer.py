@@ -100,24 +100,29 @@ class Hand:
         c = self.lm[[WRIST, INDEX_MCP, PINKY_MCP]].mean(axis=0)
         return float(c[0]), float(c[1])
 
-    def finger_extended(self, mcp: int, pip: int, tip: int, ratio: float = 2.0) -> bool:
-        """A finger is extended when its tip is much farther from its MCP than its PIP is.
+    def finger_extended(self, pip: int, tip: int, margin: float = 0.15) -> bool:
+        """Extended when the tip reaches farther from the WRIST than the PIP does.
 
-        Straight finger: |tip-mcp| ≈ 3 segments, |pip-mcp| = 1 segment → ratio ≈ 3.
-        Curled finger: the tip folds back toward the palm → ratio < ~1.5.
-        Rotation/scale invariant, no angles needed.
+        Referencing the wrist rather than the MCP gives a long, stable baseline.
+        mcp→tip and mcp→pip are short and near-parallel, so any foreshortening (hand
+        tilted toward or away from the lens) collapses the long leg and the old ratio
+        dived toward 1. Straight: tip is ~+0.7 palm-sizes past the PIP. Curled: ~-0.35
+        behind it. margin=0.15 is roughly 62° of PIP flexion — the knob to tune on camera.
         """
-        d_tip = np.linalg.norm(self.lm[tip] - self.lm[mcp])
-        d_pip = np.linalg.norm(self.lm[pip] - self.lm[mcp]) + 1e-6
-        return bool(d_tip / d_pip > ratio)
+        return self._d(tip, WRIST) - self._d(pip, WRIST) > margin * self.size
+
+    def finger_curled(self, pip: int, tip: int, margin: float = 0.05) -> bool:
+        """~85° of flexion. The gap to finger_extended is a deliberate dead band:
+        a half-flexed finger is neither, so is_horns stays silent instead of guessing."""
+        return self._d(tip, WRIST) - self._d(pip, WRIST) < -margin * self.size
 
     def is_horns(self) -> bool:
         """🤘 (or 🤟): index + pinky out, middle + ring folded. Thumb ignored."""
         return (
-            self.finger_extended(INDEX_MCP, INDEX_PIP, INDEX_TIP)
-            and self.finger_extended(PINKY_MCP, PINKY_PIP, PINKY_TIP)
-            and not self.finger_extended(MIDDLE_MCP, MIDDLE_PIP, MIDDLE_TIP)
-            and not self.finger_extended(RING_MCP, RING_PIP, RING_TIP)
+            self.finger_extended(INDEX_PIP, INDEX_TIP)
+            and self.finger_extended(PINKY_PIP, PINKY_TIP)
+            and self.finger_curled(MIDDLE_PIP, MIDDLE_TIP)
+            and self.finger_curled(RING_PIP, RING_TIP)
         )
 
 
