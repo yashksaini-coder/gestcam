@@ -208,8 +208,14 @@ class Confetti(Effect):
     def __init__(self, w, h, sprites=None, anchors=None, seed=None):
         super().__init__(w, h, sprites, seed)
         self.parts = []
-        for i in range(200):
+        # 200 rects are the texture and the density; they cost almost nothing. The last
+        # 24 also carry an emoji as readable "hero" pieces — an emoji silhouette needs
+        # ~40px to read at 720p/30fps, and 200 of those would be unreadable mush and
+        # ~5.5 ms besides.
+        for i in range(224):
+            emoji = self.rng.choice(("confetti", "confetti_ball", "sparkles", "star")) if i >= 200 else None
             self.parts.append(dict(
+                emoji=emoji,
                 x=self.rng.uniform(0, 1) * self.w,
                 y=-self.rng.uniform(0, 0.25) * self.h,
                 vy=self.rng.uniform(0.22, 0.38) * self.h,
@@ -237,6 +243,20 @@ class Confetti(Effect):
             if self.t < p["delay"] or p["y"] > self.h + 20:
                 continue
             k = max(0.15, fade)
+            if p["emoji"] and self.sprites:
+                spr = self.sprites.get(p["emoji"], p["w"] * 3.5 * k)
+                if spr is not None:
+                    # ponytail: warp per call, ~1.4 ms for 24 sprites. A pre-rotation
+                    # LUT costs ~384 cache entries and 22.5° quantised spin to save
+                    # that; only worth it if a future effect spins hundreds at once.
+                    # warpAffine is correct here only because the sprite is
+                    # premultiplied — linear filtering of straight alpha is not.
+                    sz = spr.shape[0]
+                    m = cv2.getRotationMatrix2D((sz / 2, sz / 2), math.degrees(p["ang"]), 1.0)
+                    blend_sprite(frame, cv2.warpAffine(spr, m, (sz, sz), flags=cv2.INTER_LINEAR,
+                                                       borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0)),
+                                 p["x"], p["y"], 1.0)
+                    continue
             cv2.fillConvexPoly(frame, _rot_rect(p["x"], p["y"], p["w"] * k, p["h"] * k, p["ang"]), p["col"], cv2.LINE_AA)
 
 
