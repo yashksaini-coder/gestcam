@@ -92,6 +92,7 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
     last_t = time.monotonic()
     last_obs_ts = -1.0
     last_anchors: list[tuple[float, float]] = []
+    ring: tuple[float, float] | None = None
     try:
         while not should_stop():
             got = cap.wait_frame(seq)
@@ -134,8 +135,14 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
             # before it would have fired.
             if cfg.hold_ring and state.current and last_anchors:
                 ax = sum(a[0] for a in last_anchors) / len(last_anchors)
-                ay = sum(a[1] for a in last_anchors) / len(last_anchors)
-                hold = HoldRing(ax, ay - cap.height * 0.12, state.progress(now))
+                ay = sum(a[1] for a in last_anchors) / len(last_anchors) - cap.height * 0.12
+                # EMA so landmark jitter doesn't read as "it lost me". ~3 frames of lag
+                # during fast movement; the hand is stationary by definition while held.
+                ring = (ax, ay) if ring is None else (0.7 * ring[0] + 0.3 * ax,
+                                                      0.7 * ring[1] + 0.3 * ay)
+                hold = HoldRing(ring[0], ring[1], state.progress(now))
+            else:
+                ring = None
             engine.step(frame, now - last_t, hold)
             last_t = now
 
