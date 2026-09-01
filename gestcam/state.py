@@ -8,6 +8,8 @@ Rules (all time-based, so they behave the same at 10 fps and 60 fps):
 
 * A candidate must be held continuously for `hold_s` before it fires.
 * Brief dropouts (model misses a frame) shorter than `grace_s` don't reset the hold.
+* A *different* candidate for less than `grace_s` doesn't reset it either: a two-hand
+  reaction dropping to its single-hand subset for a frame is flicker, not a new pose.
 * After firing, nothing fires for `cooldown_s`.
 * The *same* reaction won't re-fire until the hands have been released (no candidate)
   for `release_s`; a *different* reaction may fire once the cooldown has passed.
@@ -32,6 +34,8 @@ class ReactionState:
     _last_fired: str | None = field(default=None, init=False)
     _released_since: float | None = field(default=None, init=False)
     _armed_for_repeat: bool = field(default=True, init=False)
+    _challenger: str | None = field(default=None, init=False)
+    _challenger_since: float = field(default=0.0, init=False)
 
     @property
     def current(self) -> str | None:
@@ -61,8 +65,22 @@ class ReactionState:
 
         self._released_since = None
         if candidate != self._current:
+            # A different label mid-hold is usually classifier flicker, not a new pose:
+            # a two-hand reaction dropping to its single-hand subset for one frame
+            # (fireworks<->thumbs_up, confetti<->balloons, rain<->thumbs_down). A
+            # newcomer has to out-persist the flicker window before it evicts the
+            # incumbent; a genuinely sustained new gesture still wins after grace_s.
+            # ponytail: a true 50/50 A,B,A,B alternation never lets B win, because A
+            # keeps refreshing _last_seen. Upgrade to a per-candidate leaky
+            # accumulator only if that is ever actually observed.
+            if self._current is not None and now - self._last_seen <= self.grace_s:
+                if candidate != self._challenger:
+                    self._challenger, self._challenger_since = candidate, now
+                if now - self._challenger_since < self.grace_s:
+                    return None          # keep the incumbent's hold alive
             self._current = candidate
             self._since = now
+        self._challenger = None
         self._last_seen = now
 
         if now < self._cooldown_until:
