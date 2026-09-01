@@ -27,7 +27,8 @@ def _add_run_opts(p: argparse.ArgumentParser):
     p.add_argument("--cooldown", type=float, default=2.5, help="seconds between reactions")
     p.add_argument("--no-hold-ring", action="store_true", help="hide the hold-progress ring")
     p.add_argument("--model", default=None, help="path to gesture_recognizer.task (default: auto-download to cache)")
-    p.add_argument("--out", default="auto", help="auto | /dev/videoN | none")
+    p.add_argument("--out", default="auto",
+                   help="auto (every GestCam loopback) | /dev/video10,/dev/video11 | none")
     p.add_argument("--preview", action="store_true", help="also show a preview window")
     p.add_argument("--record", default=None, help="also write output to this .mp4")
 
@@ -36,9 +37,23 @@ def _dev(s: str):
     return int(s) if s.isdigit() else s
 
 
+def _out_devices(out: str, found: list[str]) -> list[str | None]:
+    """--out → the device list for VirtualCamOutput. [None] = let pyvirtualcam pick.
+
+    `found or [None]` is deliberate: with no GestCam-labelled device (module not
+    loaded, or not Linux) we hand pyvirtualcam None, which is byte-for-byte the
+    behaviour before multi-device output existed.
+    """
+    if out == "none":
+        return []
+    if out != "auto":
+        return [d.strip() for d in out.split(",") if d.strip()]
+    return found or [None]
+
+
 def cmd_run(a) -> int:
     from .pipeline import RunConfig, run
-    from .streams import FileOutput, MultiOutput, PreviewOutput, VirtualCamOutput
+    from .streams import FileOutput, MultiOutput, PreviewOutput, VirtualCamOutput, gestcam_devices
 
     cfg = RunConfig(device=_dev(a.device), width=a.width, height=a.height, fps=a.fps, mjpg=not a.no_mjpg,
                     mirror=a.mirror, infer_width=a.infer_width, infer_every=a.infer_every,
@@ -46,8 +61,16 @@ def cmd_run(a) -> int:
                     hold_ring=not a.no_hold_ring, model=a.model)
     def make_sink(w, h, fps):
         sinks = []
-        if a.out != "none":
-            sinks.append(VirtualCamOutput(w, h, fps, device=None if a.out == "auto" else a.out))
+        for d in _out_devices(a.out, gestcam_devices()):
+            try:
+                sinks.append(VirtualCamOutput(w, h, fps, device=d))
+            except Exception as e:
+                # A rival producer fails in the CONSTRUCTOR, not in send(): S_FMT
+                # returns EBUSY while another process holds the OUTPUT token. One
+                # busy device must not take the others down with it.
+                print(f"[gestcam] skipping {d}: {e}")
+        if a.out != "none" and not sinks:
+            raise RuntimeError("no virtual camera could be opened")
         if a.preview or a.out == "none":
             sinks.append(PreviewOutput())
         if a.record:
@@ -62,7 +85,7 @@ def cmd_run(a) -> int:
 
 def cmd_demo(a) -> int:
     from .pipeline import demo
-    from .streams import FileOutput, MultiOutput, PreviewOutput, VirtualCamOutput
+    from .streams import FileOutput, MultiOutput, PreviewOutput, VirtualCamOutput, gestcam_devices
 
     source = None
     if a.camera is not None:  # open first: the camera decides the real frame size
@@ -73,7 +96,10 @@ def cmd_demo(a) -> int:
     if a.out:
         sinks.append(FileOutput(a.out, a.width, a.height, a.fps))
     if a.vcam:
-        sinks.append(VirtualCamOutput(a.width, a.height, a.fps))
+        # Same fan-out as `run`, which makes `gestcam demo --vcam` the check for
+        # multi-device output: no webcam and no model needed to see both light up.
+        sinks += [VirtualCamOutput(a.width, a.height, a.fps, device=d)
+                  for d in _out_devices("auto", gestcam_devices())]
     if a.preview or not sinks:
         sinks.append(PreviewOutput("gestcam demo (q to quit)"))
     demo(MultiOutput(sinks), a.width, a.height, a.fps, a.seconds, source=source)
