@@ -388,7 +388,13 @@ class Lasers(Effect):
                 ex, ey = int(ox + math.cos(a) * L), int(oy + math.sin(a) * L)
                 cv2.line(frame, (int(ox), int(oy)), (ex, ey), tuple(c // 2 for c in col), 7, cv2.LINE_AA)
                 cv2.line(frame, (int(ox), int(oy)), (ex, ey), col, 2, cv2.LINE_AA)
-            cv2.circle(frame, (int(ox), int(oy)), int(self.h * 0.02 * (1 + 0.3 * math.sin(self.t * 20))), (255, 255, 255), -1, cv2.LINE_AA)
+            # 0.10*h sits the horns emoji over the palm, where the beams originate.
+            pulse = 1 + 0.3 * math.sin(self.t * 20)
+            spr = self.sprites.get("lasers", self.h * 0.10 * pulse) if self.sprites else None
+            if spr is not None:
+                blend_sprite(frame, spr, ox, oy, fade)
+            else:
+                cv2.circle(frame, (int(ox), int(oy)), int(self.h * 0.02 * pulse), (255, 255, 255), -1, cv2.LINE_AA)
 
     def update(self, dt):
         super().update(dt)
