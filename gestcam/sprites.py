@@ -33,15 +33,16 @@ SPRITES = {
 }
 
 
-def load_sprites(log=print) -> dict[str, np.ndarray]:
+def load_sprites(log=print) -> "SpriteSet":
+    """Every vendored emoji, ready to hand to EffectEngine."""
     out: dict[str, np.ndarray] = {}
     for name, cp in SPRITES.items():
         img = cv2.imread(str(ASSETS / f"emoji_u{cp}.png"), cv2.IMREAD_UNCHANGED)
         if img is None or img.ndim != 3 or img.shape[2] != 4:
             log(f"[gestcam] sprite {name} unreadable; using fallback")
             continue
-        out[name] = img  # BGRA, straight alpha
-    return out
+        out[name] = img  # BGRA, straight alpha; SpriteSet premultiplies
+    return SpriteSet(out)
 
 
 def _premultiply(bgra: np.ndarray) -> np.ndarray:
