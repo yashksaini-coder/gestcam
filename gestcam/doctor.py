@@ -152,6 +152,31 @@ def check_kernel_module(r: Report):
     r.add(WARN if sb == "enabled" else INFO, "secure-boot", sb + (" — unsigned DKMS modules won't load; sign the module or disable SB" if sb == "enabled" else ""), state=sb)
 
 
+def openers(dev: str) -> list[tuple[int, str, str]]:
+    """Who currently has `dev` open: [(pid, comm, "producer"|"consumer"), ...].
+
+    This is the answer to the most confusing failure in this project — a second app
+    opening a busy loopback goes black rather than erroring visibly — so doctor should
+    just name the process holding it. O_WRONLY means a producer (gestcam); anything
+    else is a consumer (Discord, a browser, mpv).
+    """
+    held = []
+    for fd in glob.glob("/proc/[0-9]*/fd/*"):
+        try:
+            if os.readlink(fd) != dev:
+                continue
+            pid = int(fd.split("/")[2])
+            comm = read(f"/proc/{pid}/comm") or "?"
+            flags = 0
+            for line in read(f"/proc/{pid}/fdinfo/{os.path.basename(fd)}").splitlines():
+                if line.startswith("flags:"):
+                    flags = int(line.split()[1], 8)
+            held.append((pid, comm, "producer" if flags & 3 == os.O_WRONLY else "consumer"))
+        except (OSError, ValueError, IndexError):
+            pass          # process exited mid-scan
+    return sorted(set(held))
+
+
 def check_video_devices(r: Report):
     devs = []
     for p in sorted(glob.glob("/sys/class/video4linux/video*"), key=lambda s: int(re.sub(r"\D", "", s) or 0)):
@@ -165,9 +190,30 @@ def check_video_devices(r: Report):
         r.add(FAIL, "video-devices", "no /dev/video* at all — no webcam detected?")
     for d in devs:
         kind = "LOOPBACK" if d["loopback"] else "camera "
-        r.add(INFO, f"video.{os.path.basename(d['dev'])}", f"{kind} {d['name']}" + (f" [{', '.join(d['caps'])}]" if d["caps"] else ""), **d)
+        d["holders"] = [f"{c} pid {n} ({k})" for n, c, k in openers(d["dev"])]
+        msg = f"{kind} {d['name']}" + (f" [{', '.join(d['caps'])}]" if d["caps"] else "")
+        if d["holders"]:
+            msg += " | held by " + ", ".join(d["holders"])
+        r.add(INFO, f"video.{os.path.basename(d['dev'])}", msg, **d)
+        if d["loopback"]:
+            # v4l2loopback's `state` reads "capture" exactly while a producer holds the
+            # OUTPUT stream token (attr_show_state, v4l2loopback.c:762). No open needed.
+            n = os.path.basename(d["dev"])
+            st = read(f"/sys/class/video4linux/{n}/state")
+            fmt = read(f"/sys/class/video4linux/{n}/format")
+            r.add(INFO, f"loopback.producer[{d['dev']}]",
+                  f"{st} ({fmt})" if st == "capture" else
+                  f"{st or 'unknown'} — no producer; start `gestcam run` before opening the camera picker")
     real = [d for d in devs if not d["loopback"] and not d["name"].lower().startswith("v4l2 loopback")]
     loops = [d for d in devs if d["loopback"]]
+    gest = [d["dev"] for d in devs if d["name"].startswith("GestCam")]
+    if gest:
+        # One device serves exactly one streaming consumer (vidioc_reqbufs -EBUSY on
+        # the second capture client), so the device count is the app count.
+        tail = "" if len(gest) >= 2 else \
+            " — one device serves one streaming consumer; reload with video_nr=10,11 (see fixes)"
+        r.add(INFO, "v4l2loopback.gestcam-devices",
+              f"{len(gest)} GestCam device(s): {', '.join(gest)}{tail}", devices=gest)
     r.data["video_devices"] = devs
     if not loops:
         r.add(WARN, "video.loopback", "no v4l2loopback device present (load the module)")
@@ -188,6 +234,15 @@ def probe_camera(r: Report, device: str | None):
     if not cams:
         return
     dev = cams[0]
+    # gestcam holds the real camera exclusively while it runs, so probing would fail
+    # and (because run_doctor returns 1 on any FAIL) turn the HEALTHY state red — with
+    # the loudest row pointing at the wrong device. Say who has it instead.
+    held = openers(dev) if isinstance(dev, str) else []
+    if held:
+        r.add(INFO, "camera.probe",
+              f"{dev} held by " + ", ".join(f"{c} pid {n}" for n, c, _ in held) + " — not probing",
+              dev=dev, holders=[c for _, c, _ in held])
+        return
     idx = int(re.sub(r"\D", "", dev)) if isinstance(dev, str) and dev.startswith("/dev/video") else dev
     try:
         cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
@@ -269,12 +324,15 @@ def fixes(r: Report) -> str:
             lines.append("  install v4l2loopback-dkms + kernel headers for your distro")
     lines += [
         "  # one-shot (lost on reboot):",
-        '  sudo modprobe -r v4l2loopback 2>/dev/null; sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="GestCam" exclusive_caps=1',
+        "  sudo modprobe -r v4l2loopback 2>/dev/null; sudo modprobe v4l2loopback video_nr=10,11 card_label=GestCam,GestCam2 exclusive_caps=1,1",
         "  # persistent:",
-        "  echo 'options v4l2loopback devices=1 video_nr=10 card_label=\"GestCam\" exclusive_caps=1' | sudo tee /etc/modprobe.d/v4l2loopback.conf",
+        "  echo 'options v4l2loopback video_nr=10,11 card_label=GestCam,GestCam2 exclusive_caps=1,1' | sudo tee /etc/modprobe.d/v4l2loopback.conf",
         "  echo v4l2loopback | sudo tee /etc/modules-load.d/v4l2loopback.conf",
         "  # verify the device and (while gestcam runs) what it advertises:",
-        "  v4l2-ctl --list-devices; v4l2-ctl -d /dev/video10 --list-formats-ext",
+        "  v4l2-ctl --list-devices; v4l2-ctl -d /dev/video10 --list-formats-ext; v4l2-ctl -d /dev/video11 --list-formats-ext",
+        "  # one loopback device serves exactly ONE streaming consumer: the second app to",
+        "  # start gets 'Device or resource busy' (VIDIOC_REQBUFS -EBUSY) and shows black.",
+        "  # Two devices, one per app — point native Discord at GestCam and the browser at GestCam2.",
         "  # watch the virtual cam without Discord:  mpv av://v4l2:/dev/video10",
     ]
     return "\n".join(lines)
