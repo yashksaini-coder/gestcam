@@ -36,7 +36,10 @@ class Capture:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_FPS, fps)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # NOT CAP_PROP_BUFFERSIZE=1: with a single V4L2 buffer the driver has
+        # nothing queued while we decode, and 720p MJPG drops 30 fps -> 20 fps
+        # (measured). The newest-frame-wins thread below already keeps latency
+        # to ~1 frame, which is what BUFFERSIZE was reaching for.
         ok, frame = self.cap.read()
         if not ok:
             raise RuntimeError("camera opened but returned no frame")
