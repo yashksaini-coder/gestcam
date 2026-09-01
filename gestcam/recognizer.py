@@ -190,9 +190,12 @@ def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
         if a.is_horns() and b.is_horns():
             return "lasers"
 
-    best = max(hands, key=lambda h: h.score)
     single = {"Thumb_Up": "thumbs_up", "Thumb_Down": "thumbs_down", "Victory": "balloons"}
-    return single.get(lab(best))
+    # Rank only hands whose label maps to something. Hand.score is the score of the top
+    # canned class, and for a resting hand that class is "None" at 0.9+ — which would
+    # outrank a deliberate Thumb_Up@0.7 and swallow the whole frame.
+    best = max((h for h in hands if lab(h) in single), key=lambda h: h.score, default=None)
+    return single[best.label] if best is not None else None
 
 
 class GestureRecognizer:
