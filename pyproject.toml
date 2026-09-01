@@ -6,10 +6,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    # mediapipe >=1.0 ships a py3-none (ABI-agnostic) manylinux wheel and pulls
-    # opencv-contrib-python itself. Do NOT also install opencv-python or
-    # opencv-python-headless: two cv2 packages in one env = broken imports.
-    "mediapipe>=1.0.1",
+    # mediapipe pulls opencv-contrib-python itself. Do NOT also install
+    # opencv-python or opencv-python-headless: two cv2 packages in one env =
+    # broken imports.
+    # Pinned <1.0: mediapipe 1.0.1 SIGKILLs the process on the first inference
+    # (any running mode, camera or not) on 13th-gen Intel / kernel 7.1. 0.10.x
+    # is fine. >=1.0's only draw was the ABI-agnostic wheel, and uv pins 3.12
+    # here anyway, so the cp312 wheel covers us.
+    "mediapipe>=0.10.21,<1.0",
     "opencv-contrib-python>=4.10",
     "numpy>=1.26",
     "pyvirtualcam>=0.13",
