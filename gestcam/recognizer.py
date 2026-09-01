@@ -47,6 +47,16 @@ RING_MCP, RING_PIP, RING_TIP = 13, 14, 16
 PINKY_MCP, PINKY_PIP, PINKY_TIP = 17, 18, 20
 
 
+def _d(p, q, aspect: float = 1.0) -> float:
+    """Distance in units of image height.
+
+    MediaPipe normalizes x by image width and y by image height, so a raw norm over
+    landmarks mixes units: at 1280x720 an equal physical span reads 1.78x smaller
+    horizontally. Scaling x by aspect (w/h) puts both axes in the same unit.
+    """
+    return math.hypot((p[0] - q[0]) * aspect, p[1] - q[1])
+
+
 def cache_dir() -> pathlib.Path:
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     p = pathlib.Path(base) / "gestcam"
@@ -72,11 +82,19 @@ class Hand:
     score: float
     handedness: str            # "Left" / "Right" (as reported for the frame we fed, mirroring included)
     lm: np.ndarray             # (21, 2) normalized x,y in [0,1]
+    aspect: float = 1.0        # image width / height; 1.0 keeps square-image tests honest
+
+    def _d(self, i: int, j: int) -> float:
+        return _d(self.lm[i], self.lm[j], self.aspect)
 
     @property
     def size(self) -> float:
-        """Palm size proxy: wrist → middle MCP distance (normalized units)."""
-        return float(np.linalg.norm(self.lm[MIDDLE_MCP] - self.lm[WRIST])) + 1e-6
+        """Palm size proxy: wrist → middle MCP distance, in units of image height.
+
+        Every threshold in this file is expressed as a multiple of this, so it must
+        not depend on how the hand happens to be rotated.
+        """
+        return self._d(MIDDLE_MCP, WRIST) + 1e-6
 
     def palm_center(self) -> tuple[float, float]:
         c = self.lm[[WRIST, INDEX_MCP, PINKY_MCP]].mean(axis=0)
@@ -196,6 +214,7 @@ class GestureRecognizer:
                 score=float(top.score) if top else 0.0,
                 handedness=handed,
                 lm=arr,
+                aspect=image.width / image.height,
             ))
         obs = Observation(
             ts=self._t0 + timestamp_ms / 1000.0,
