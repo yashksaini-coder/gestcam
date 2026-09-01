@@ -30,7 +30,8 @@ Modules: `streams.py` (capture + sinks) · `recognizer.py` (MediaPipe wrapper + 
 | **Inference at 640 px wide** | Hand landmarker resizes to 224 internally; feeding 1280 just costs a bigger copy. Landmarks are normalized, so effects still render at full resolution. |
 | **Time-based hold (0.7 s) + cooldown (2.5 s) + release-to-repeat** | Same feel as Apple's "hold and pause". Frame-count debouncing breaks the moment fps changes. |
 | **Opaque OpenCV primitives, ROI alpha only for sprites** | Full-frame float alpha blend ≈ 10–15 ms at 720p. Measured: all 8 effects at once ≈ 10 ms on a 2.1 GHz Xeon; any single effect ≤ 2 ms. |
-| **mediapipe ≥ 1.0** | Ships a `py3-none` (ABI-agnostic) manylinux wheel + abi3 OpenCV → works on Arch's current Python without pinning. 0.10.x needed a CPython-version-matched wheel. |
+| ~~**mediapipe ≥ 1.0**~~ → **mediapipe < 1.0**, pinned | **Superseded.** 1.0.1 SIGKILLs the process on its first inference on this machine — reproduced with no camera, no virtual camera and no gestcam code, on a single static frame, in all three running modes. Not OOM (peak RSS 251 MB, 12 GB free, no cgroup limit), no coredump, no seccomp/audit trace, `RLIMIT_RTTIME` already unlimited. 0.10.x runs the same model fine. The ABI-agnostic wheel was only insurance against a bleeding-edge interpreter, which `uv python pin 3.12` retires. |
+| **Two loopback devices, not one** | One v4l2loopback device serves exactly **one streaming consumer**: `VIDIOC_REQBUFS` returns `-EBUSY` to the second capture client, while `max_openers=10` gates only `open()` — so the second app opens the device and then shows black. Measured both ways round (native Discord holding it, then Brave holding it). `video_nr`/`card_label`/`exclusive_caps` are per-device arrays, so all three must be comma lists or the second device comes up invisible to Chromium. |
 | **`uv` + `pyproject.toml`** | Isolated from system Python; `uv python pin 3.12` is the escape hatch if a wheel is missing for a bleeding-edge interpreter. |
 
 ## Risk register (from research + sandbox testing)
@@ -48,6 +49,7 @@ Modules: `streams.py` (capture + sinks) · `recognizer.py` (MediaPipe wrapper + 
 | 9 | False triggers (thumb visible while talking with hands) | Medium | you'll notice | `--min-score`, `--hold`; two-hand gestures are inherently rarer |
 | 10 | CPU too slow for model at 30 fps | Low on a dev laptop | stats line `infer p50/p95` | `--infer-every 2`, `--infer-width 480` |
 | 11 | Camera stalls when gestcam and Discord both open the *real* webcam | Certain if it happens | "camera stalled" log | only gestcam opens the webcam; Discord uses GestCam |
+| 12 | **Two apps fight over one loopback → second shows black** | **Certain; this is what broke Discord-web** | `doctor` → `video.videoN` names the holder; `v4l2loopback.gestcam-devices` counts devices | two devices (`video_nr=10,11`), gestcam fans out to both |
 
 Not risks: Hyprland/Wayland itself (V4L2 doesn't go through the compositor); mirroring (Discord mirrors your self-view locally; output is unmirrored like a real cam).
 
@@ -55,7 +57,7 @@ Not risks: Hyprland/Wayland itself (V4L2 doesn't go through the compositor); mir
 
 - **Phase 1 — works on your machine (now).** `doctor` → `loopback.sh` → `demo` → `run` → Discord. Bring back: doctor JSON, the stats lines, which gestures misfire.
 - **Phase 2 — feel.** Tune hold/cooldown, false-positive rate, effect timing on real video. Per-gesture score thresholds. Config file. Maybe a tray/Waybar indicator. Optional: mirror-aware placement of the thumb bubble.
-- **Phase 3 — PipeWire backend.** `pipewiresink` via GStreamer subprocess (`fdsrc` raw frames). No kernel module, works for PipeWire-camera consumers (Firefox, Chromium w/ flag, OBS). Keep v4l2loopback as default until Chromium flips.
+- **Phase 3 — PipeWire backend.** `pipewiresink` via GStreamer subprocess (`fdsrc` raw frames). No kernel module, works for PipeWire-camera consumers (Firefox, Chromium w/ flag, OBS), and — the real draw — PipeWire multiplexes one source to many consumers natively, which is the problem two loopback devices currently solve by brute force. Still deferred: Chromium's PipeWire camera flag is off by default on this machine for chromium, chrome *and* Brave, so a PipeWire-only source would be invisible to the exact app this project exists for. Revisit when that flag flips.
 - **Phase 4 — Windows.** pyvirtualcam already targets OBS Virtual Camera there; `Capture` drops `CAP_V4L2`. The rest is identical. Untested.
 - **Phase 5 — custom gestures.** MediaPipe Model Maker to train a real 🫶/🤘 classifier if the geometric rules misfire.
 
@@ -74,3 +76,14 @@ Not risks: Hyprland/Wayland itself (V4L2 doesn't go through the compositor); mir
 - Demo render at 720p: all eight effects visually checked.
 
 **Not** verified anywhere yet: real gesture recognition quality, v4l2loopback write, Discord device listing. That's the first thing your machine tells us.
+
+## Verified on the target machine (Omarchy, i7-13620H, HP Wide Vision HD)
+
+- Output holds **30.2 fps** at 1280x720 MJPG; loop p50 ~2.4 ms of a 33.3 ms budget.
+- v4l2loopback write works; Chromium/Brave list **GestCam** and pick it as the *default*
+  `getUserMedia` device, returning live frames. There was never a browser-side bug.
+- Per-effect draw cost at 720p: confetti 10.4 ms, rain 2.6, fireworks 2.5, hearts 1.8,
+  lasers 1.7, thumbs 1.4/1.3, balloons 0.8. `hold_s + cooldown_s` keeps fires ≥3.2 s
+  apart, so at most two overlap: measured worst case 12.5 ms.
+- Seven classifier bugs found and fixed by reproduction, the largest being that a held
+  gesture could fire **never** under label flicker (10 s of holding, zero triggers).
