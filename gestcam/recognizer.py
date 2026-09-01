@@ -168,7 +168,12 @@ def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
     def lab(h: Hand) -> str:
         return h.label if h.score >= min_score else "None"
 
-    if len(hands) >= 2:
+    # A duplicate detection of ONE hand puts both wrists in the same place; a real
+    # two-hand pose never does. Without this floor, one thumbs-up reads as "hearts"
+    # (index tips ~0 apart, thumb tips ~0 apart, index above thumb — true of nearly
+    # any upright hand). 1.0 * max(size) is the knob: raise it if two genuinely
+    # adjacent hands still over-fire.
+    if len(hands) >= 2 and _d(hands[0].lm[WRIST], hands[1].lm[WRIST], hands[0].aspect) > max(hands[0].size, hands[1].size):
         a, b = hands[0], hands[1]
         if is_heart(a, b):
             return "hearts"
