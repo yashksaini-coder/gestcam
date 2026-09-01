@@ -91,6 +91,7 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
     seq = -1
     last_t = time.monotonic()
     last_obs_ts = -1.0
+    last_anchors: list[tuple[float, float]] = []
     try:
         while not should_stop():
             got = cap.wait_frame(seq)
@@ -119,15 +120,21 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
                 if obs.ts != last_obs_ts and obs.infer_ms:
                     stats.infer_ms.append(obs.infer_ms)
                     last_obs_ts = obs.ts
+            if anchors:
+                last_anchors = anchors
             fired = state.update(candidate, now)
             if fired:
                 log(f"[gestcam] ▶ {fired}  (hands={[h.label for h in obs.hands] if obs else []})")
                 engine.trigger(fired, anchors)
 
             hold = None
-            if cfg.hold_ring and candidate and anchors:
-                ax = sum(a[0] for a in anchors) / len(anchors)
-                ay = sum(a[1] for a in anchors) / len(anchors)
+            # Ring follows the state machine, not the per-frame candidate. The hold
+            # survives sub-grace dropouts, so the ring must too — a ring that blinks
+            # out reads as "it lost me" and the user drops the gesture one frame
+            # before it would have fired.
+            if cfg.hold_ring and state.current and last_anchors:
+                ax = sum(a[0] for a in last_anchors) / len(last_anchors)
+                ay = sum(a[1] for a in last_anchors) / len(last_anchors)
                 hold = HoldRing(ax, ay - cap.height * 0.12, state.progress(now))
             engine.step(frame, now - last_t, hold)
             last_t = now
