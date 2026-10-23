@@ -25,6 +25,11 @@ gestcam = "gestcam.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
+# Same list as the extra: the group is what makes plain `uv run pytest` work (uv syncs
+# the dev group by default); the extra keeps `pip install -e .[dev]` working.
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -34,3 +39,4 @@ packages = ["gestcam"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
