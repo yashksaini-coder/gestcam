@@ -100,6 +100,18 @@ def check_python(r: Report):
         pass
 
 
+def check_models(r: Report):
+    """Both models download on first run; say so up front instead of mid-call."""
+    from .recognizer import cache_dir
+    for key, name, what in [("model.gesture", "gesture_recognizer.task", "gestures"),
+                            ("model.segmenter", "selfie_segmenter.tflite", "person mask, effects behind you")]:
+        p = cache_dir() / name
+        if p.exists():
+            r.add(OK, key, f"{p} ({p.stat().st_size / 1e6:.1f} MB)", path=str(p))
+        else:
+            r.add(INFO, key, f"not cached; downloads to {p} on first `gestcam run` ({what})", path=str(p))
+
+
 def _dist_installed(md, name: str) -> bool:
     try:
         md.version(name)
@@ -342,6 +354,7 @@ def run_doctor(as_json: bool = False, probe: bool = True, device: str | None = N
     r = Report()
     check_system(r)
     check_python(r)
+    check_models(r)
     check_kernel_module(r)
     check_video_devices(r)
     if probe:
