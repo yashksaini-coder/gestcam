@@ -32,8 +32,13 @@ SPRITES = {
     "fireworks": "1f386", "sparkler": "1f387", "firecracker": "1f9e8",
 }
 
+# Balloon colours, as OpenCV hue shifts (0-180 scale) of the red Noto balloon: red,
+# orange, yellow, green, blue, purple, pink. Derived once at load (`balloon0`..`balloon6`)
+# rather than vendored: one PNG, seven colours, and grey (the string) has no hue to shift.
+BALLOON_HUES = (0, 12, 26, 58, 104, 135, 163)
 
-def load_sprites(log=print) -> "SpriteSet":
+
+def load_sprites(log=print) -> SpriteSet:
     """Every vendored emoji, ready to hand to EffectEngine."""
     out: dict[str, np.ndarray] = {}
     for name, cp in SPRITES.items():
@@ -61,8 +66,15 @@ def _premultiply(bgra: np.ndarray) -> np.ndarray:
     return out
 
 
+def _hue_shift(bgra: np.ndarray, d: int) -> np.ndarray:
+    """Rotate hue of a straight-alpha BGRA sprite by d (OpenCV 0-180 units)."""
+    hsv = cv2.cvtColor(bgra[:, :, :3], cv2.COLOR_BGR2HSV)
+    hsv[:, :, 0] = ((hsv[:, :, 0].astype(np.int16) + d) % 180).astype(np.uint8)
+    return np.dstack([cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR), bgra[:, :, 3]])
+
+
 class SpriteSet:
-    """Premultiplied Noto emoji, cached per (name, 8px size bucket).
+    """Premultiplied Noto emoji, cached per (name, size bucket).
 
     Per-call cv2.resize dominates sprite cost: 200 sprites @20px measured 19.8 ms at
     720p, 5.5 ms prescaled. Particle size is near-constant frame to frame, so the
@@ -73,10 +85,15 @@ class SpriteSet:
     entries and 22.5° quantisation to save that is complexity with no need.
     """
 
-    CACHE_MAX_PX = 128  # above this, resize per call (0.12 ms at 260px) so the Thumb's
-                        # ease_out_back size sweep cannot balloon the cache
+    # Above this, resize per call (0.12 ms at 260 px). 192 covers front balloons (0.20-0.26
+    # h = 144-187 px at 720p, fixed per balloon): at 128 they missed the cache and paid
+    # ~4 resizes / 0.4 ms every frame. The Thumb's size sweep resizes its own bubble and
+    # never comes through here, so the cap only bounds odd one-off callers.
+    CACHE_MAX_PX = 192
 
     def __init__(self, raw: dict[str, np.ndarray]):
+        if "balloons" in raw:
+            raw = {**raw, **{f"balloon{i}": _hue_shift(raw["balloons"], d) for i, d in enumerate(BALLOON_HUES)}}
         self.raw = {k: _premultiply(v) for k, v in raw.items()}
         # ponytail: plain dict, no eviction. ~130 entries / ~1.2 MB in practice.
         # LRU only if a future effect sweeps far more sizes than the Thumb pop does.
@@ -91,7 +108,10 @@ class SpriteSet:
         base = self.raw.get(name)
         if base is None or size_px < 6:
             return None
-        s = max(8, (int(size_px) // 8) * 8)
+        # 4 px buckets below 64 px, 8 above: an 8 px step is 13-25% of a small sprite, so
+        # a pulse or scale-in on one visibly jumped (E10). Still ~2x fewer entries than 1 px.
+        step = 4 if size_px < 64 else 8
+        s = max(8, (int(size_px) // step) * step)
         img = self._cache.get((name, s))
         if img is not None:
             return img
