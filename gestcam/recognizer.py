@@ -2,12 +2,16 @@
 
 Two layers, deliberately separated so the second is unit-testable without a model:
 
-1. `GestureRecognizer`: thin wrapper around MediaPipe Tasks GestureRecognizer in
-   LIVE_STREAM mode. Inference runs on MediaPipe's own thread; we only ever read the
-   *latest* result. The capture/compose loop never blocks on the model.
-2. `pick(hands)`: pure function. Takes per-hand canned labels + landmarks, returns one
-   of REACTIONS (or None) *and* the hands that decided it, so effects can anchor on the
-   hand that actually fired. `reaction_for` is the reaction-only adapter.
+1. `GestureRecognizer`: thin wrapper around MediaPipe Tasks GestureRecognizer. In
+   LIVE_STREAM mode inference runs on MediaPipe's own thread; we only ever read the
+   *latest* result. The capture/compose loop never blocks on the model. VIDEO mode is
+   the same tracker, synchronous, for offline eval.
+2. `pick(hands)`: pure function. Each hand gets one pose from `Hand.pose()` (canned
+   label fused with landmark geometry); pairs of hands become two-hand reactions.
+   Returns one of REACTIONS (or None) *and* the hands that decided it, so effects can
+   anchor on the hand that actually fired. `reaction_for` is the reaction-only adapter.
+
+Landmark fixtures from real photos (tests/fixtures/photo_hands.json) pin the rules.
 """
 
 from __future__ import annotations
@@ -41,7 +45,7 @@ MODEL_URL = (
 
 # MediaPipe hand landmark indices.
 WRIST = 0
-THUMB_TIP = 4
+THUMB_MCP, THUMB_TIP = 2, 4
 INDEX_MCP, INDEX_PIP, INDEX_TIP = 5, 6, 8
 MIDDLE_MCP, MIDDLE_PIP, MIDDLE_TIP = 9, 10, 12
 RING_MCP, RING_PIP, RING_TIP = 13, 14, 16
@@ -65,14 +69,24 @@ def cache_dir() -> pathlib.Path:
     return p
 
 
-def ensure_model(path: str | None = None, log=print) -> pathlib.Path:
-    """Return the path to gesture_recognizer.task, downloading it on first run."""
-    p = pathlib.Path(path) if path else cache_dir() / "gesture_recognizer.task"
-    if p.exists() and p.stat().st_size > 1_000_000:
+def ensure_model(
+    path: str | None = None,
+    log=print,
+    url: str = MODEL_URL,
+    filename: str = "gesture_recognizer.task",
+    min_bytes: int = 1_000_000,
+) -> pathlib.Path:
+    """Return the path to a cached model, downloading it on first run.
+
+    min_bytes is the "this is a real model, not a truncated download" floor: the
+    gesture bundle is 8.4 MB, the selfie segmenter 250 KB, so each caller sets its own.
+    """
+    p = pathlib.Path(path) if path else cache_dir() / filename
+    if p.exists() and p.stat().st_size > min_bytes:
         return p
-    log(f"[gestcam] downloading gesture model → {p}")
+    log(f"[gestcam] downloading {filename} → {p}")
     tmp = p.with_suffix(".part")
-    urllib.request.urlretrieve(MODEL_URL, tmp)
+    urllib.request.urlretrieve(url, tmp)
     tmp.replace(p)
     return p
 
@@ -84,6 +98,7 @@ class Hand:
     handedness: str            # "Left" / "Right" (as reported for the frame we fed, mirroring included)
     lm: np.ndarray             # (21, 2) normalized x,y in [0,1]
     aspect: float = 1.0        # image width / height; 1.0 keeps square-image tests honest
+    handed_score: float = 1.0  # MediaPipe's confidence in `handedness`
 
     def _d(self, i: int, j: int) -> float:
         return _d(self.lm[i], self.lm[j], self.aspect)
@@ -126,6 +141,88 @@ class Hand:
             and self.finger_curled(RING_PIP, RING_TIP)
         )
 
+    def is_victory(self) -> bool:
+        """✌️: index + middle out, ring + pinky folded, pointing up. Thumb ignored.
+
+        Measured on 22 Commons photos: 6/6 V hands, 0 of the other hands. The canned
+        classifier got 2 of those 6 (None:.96, None:.91, Pointing_Up:.64 on textbook V
+        signs). "Pointing up" = index MCP→tip within 60° of vertical (real V hands
+        measured ≤33° off): one hand of an inverted heart is a V pointing *down*, and
+        without this it fired balloons when the palm detector found only that hand.
+        """
+        vx = (self.lm[INDEX_TIP][0] - self.lm[INDEX_MCP][0]) * self.aspect
+        vy = self.lm[INDEX_TIP][1] - self.lm[INDEX_MCP][1]
+        return (
+            vy < 0 and abs(vx) <= -vy * math.tan(math.radians(60))
+            and self.finger_extended(INDEX_PIP, INDEX_TIP)
+            and self.finger_extended(MIDDLE_PIP, MIDDLE_TIP)
+            and self.finger_curled(RING_PIP, RING_TIP)
+            and self.finger_curled(PINKY_PIP, PINKY_TIP)
+        )
+
+    def thumb_dir(self, min_len: float = 0.45, beyond: float = 0.25, beyond_down: float = 0.1) -> int:
+        """+1 thumbs-up, -1 thumbs-down, 0 neither. Four fingers must be folded.
+
+        - thumb extended: MCP→tip at least min_len palms (real thumbs 0.53-1.86 upright;
+          rolled, the real model jitters them to 0.48-0.50 frame to frame).
+        - thumb tip is the extreme point of the hand: above every other landmark by
+          `beyond` palms (below by `beyond_down`). That is "roughly vertical" without
+          an angle, and a resting fist's thumb lies alongside the knuckles, not past them.
+          Measured upright: thumbs-up +0.74..+2.43, thumbs-down +0.35..+0.93.
+        - Down gets the thinner margin: wrist pronation keeps a thumbs-down short, and
+          the curled index hangs right beside it, so roll eats the margin fast. Real
+          model, geometry-only td_videocall: +0.35 upright, +0.21 letterboxed 16:9,
+          +0.15 rolled 20° — all lost at 0.25. ponytail: 0.1 is not checked against
+          real resting fists (none in the photo set; every four-curled hand in 170
+          variants was a thumb gesture); Closed_Fist >= conflict_score still vetoes.
+          Re-measure on the user's --record-raw clip. Rolled 35° (-0.04) stays lost.
+        Lengths are in palm sizes, aspect-corrected, so distance to camera drops out.
+        """
+        if not all(self.finger_curled(p, t) for p, t in _FINGERS):
+            return 0
+        if self._d(THUMB_TIP, THUMB_MCP) < min_len * self.size:
+            return 0
+        y, rest = self.lm[THUMB_TIP][1], self.lm[INDEX_MCP:, 1]
+        if rest.min() - y > beyond * self.size:
+            return 1
+        if y - rest.max() > beyond_down * self.size:
+            return -1
+        return 0
+
+    def pose(self, min_score: float = 0.5, conflict_score: float = 0.7) -> str | None:
+        """This hand's pose, fusing the canned label with landmark geometry.
+
+        The canned top-1 label alone missed 4 of 6 clear V signs on real photos, and
+        MediaPipe 0.10 returns only one category (no runner-up to fall back on), so
+        geometry gets a vote:
+        - horns: geometry only, and it outranks the label. The model has no horns class
+          and labelled horns hands Victory; horns (middle folded) and V (middle out)
+          are geometrically exclusive, so the label is simply wrong there.
+        - canned label mapped to a pose at >= min_score: trusted.
+        - otherwise geometry, unless the model is confident (>= conflict_score) the hand
+          is some *other* named class (Open_Palm, Closed_Fist, ...). "None" never
+          conflicts: the model says None:.96 on V signs. Nor does Pointing_Up against
+          V, for the horns reason: pointing has the middle folded, V has it out. The
+          model reads real V signs Pointing_Up .64-.72 (v_adolescent rolled 20°: .70-.71
+          on every frame, so a .7 veto meant it never fired; mirrored v_girl flickered).
+        """
+        if self.is_horns():
+            return "horns"
+        canned = _CANNED_POSE.get(self.label)
+        if canned and self.score >= min_score:
+            return canned
+        geo = "victory" if self.is_victory() else _THUMB_POSE.get(self.thumb_dir())
+        if geo is None or (geo == "victory" and self.label == "Pointing_Up"):
+            return geo
+        if self.label not in ("None", "") and _CANNED_POSE.get(self.label) != geo and self.score >= conflict_score:
+            return None
+        return geo
+
+
+_FINGERS = ((INDEX_PIP, INDEX_TIP), (MIDDLE_PIP, MIDDLE_TIP), (RING_PIP, RING_TIP), (PINKY_PIP, PINKY_TIP))
+_CANNED_POSE = {"Thumb_Up": "thumb_up", "Thumb_Down": "thumb_down", "Victory": "victory"}
+_THUMB_POSE = {1: "thumb_up", -1: "thumb_down"}
+
 
 @dataclass
 class Observation:
@@ -134,73 +231,138 @@ class Observation:
     infer_ms: float = 0.0              # model latency for this observation
 
 
-def is_heart(a: Hand, b: Hand, tol: float = 0.55) -> bool:
-    """Two-hand heart: index tips touching, thumb tips touching, and the index junction
-    at least a third of a palm above the thumb junction.
+# Handedness below this is a coin flip (MediaPipe is ~0.9+ on a clear hand); trust
+# "same hand twice" only above it, else fall back to landmark distance alone.
+HANDED_CONF = 0.8
 
-    The tip tolerances are divided by palm size, so a heart at arm's length and one at
-    30 cm normalise identically. The vertical test is the one that used to be fragile:
-    a bare `index_y < thumb_y` passes on a single pixel, which two hands merely resting
-    near each other satisfy. Requiring real extent survives ~±30° of roll instead.
 
-    If hearts still false-fires on camera, raise the two-hand wrist floor in
-    reaction_for rather than adding a second floor here — one floor, one constant.
+def _opposite_or_unsure(a: Hand, b: Hand) -> bool:
+    """False only when MediaPipe is confident both are the same hand (Left+Left).
+
+    --mirror flips both labels, so "they differ" survives mirroring.
     """
+    if min(a.handed_score, b.handed_score) < HANDED_CONF:
+        return True
+    return a.handedness != b.handedness
+
+
+def _mean_lm_dist(a: Hand, b: Hand) -> float:
+    """Mean distance over all 21 landmarks, in palm sizes.
+
+    A duplicate box for one hand lands every landmark on top of its twin; two real
+    hands held together (thumbs side by side, wrists 0.5 palm apart) still differ by
+    a palm or more somewhere. The old wrist-only floor couldn't tell these apart.
+    """
+    d = (a.lm - b.lm) * np.array([a.aspect, 1.0], np.float32)
+    return float(np.hypot(d[:, 0], d[:, 1]).mean()) / max(a.size, b.size)
+
+
+def _palm_gap(a: Hand, b: Hand) -> float:
+    """Palm-centre distance in units of the larger palm."""
+    return _d(a.palm_center(), b.palm_center(), a.aspect) / max(a.size, b.size)
+
+
+def is_heart(a: Hand, b: Hand, tol: float = 0.55) -> bool:
+    """Two-hand heart: index tips touching, thumb tips touching, the two junctions at
+    least a third of a palm apart vertically, from opposite hands.
+
+    Both orientations count. Apple's reviewers describe thumbs at the bottom, but both
+    real hearts MediaPipe detected in the photo set were the inverted one (thumbs on
+    top, fingers pointing down, vy -0.92 / -0.68), and nobody can tell them apart on a
+    call. What differs is how to reject the open-palm "frame" pose (probe P3), which
+    puts index and thumb tips together just the same:
+    - thumbs at the bottom: middle/ring/pinky must not be extended. They curl round
+      into the lobes; in the frame pose they stand straight up.
+    - thumbs on top: the fingers point down (index tips below both wrists). The
+      inverted heart's fingers ARE straight (measured M+.68 R+.56 P+.27), so the curl
+      test would reject every real one; pointing down is what the frame pose never does.
+
+    Tip tolerances are in palm sizes, so arm's length and 30 cm normalise identically.
+    """
+    if not _opposite_or_unsure(a, b):
+        return False
     size = 0.5 * (a.size + b.size)
-    idx = _d(a.lm[INDEX_TIP], b.lm[INDEX_TIP], a.aspect) / size
-    thb = _d(a.lm[THUMB_TIP], b.lm[THUMB_TIP], a.aspect) / size
-    if idx > tol or thb > tol * 1.3:
+    if _d(a.lm[INDEX_TIP], b.lm[INDEX_TIP], a.aspect) / size > tol:
+        return False
+    if _d(a.lm[THUMB_TIP], b.lm[THUMB_TIP], a.aspect) / size > tol * 1.3:
         return False
     index_y = 0.5 * (a.lm[INDEX_TIP][1] + b.lm[INDEX_TIP][1])
     thumb_y = 0.5 * (a.lm[THUMB_TIP][1] + b.lm[THUMB_TIP][1])
-    return thumb_y - index_y > 0.30 * size  # image y grows downward
+    if thumb_y - index_y > 0.30 * size:  # classic: image y grows downward
+        return not any(
+            h.finger_extended(p, t) for h in (a, b) for p, t in _FINGERS[1:]
+        )
+    if index_y - thumb_y > 0.30 * size:  # inverted
+        return index_y > max(a.lm[WRIST][1], b.lm[WRIST][1])
+    return False
+
+
+# Same pose on both hands → the "big" scene effect (Apple's pattern).
+PAIR = {"thumb_up": "fireworks", "thumb_down": "rain", "victory": "confetti", "horns": "lasers"}
+SINGLE = {"thumb_up": "thumbs_up", "thumb_down": "thumbs_down", "victory": "balloons"}
+
+
+def pairable(a: Hand, b: Hand, dup: float = 0.3, far: float = 6.0) -> bool:
+    """Could these two detections be one person's two hands?
+
+    - dup 0.3: mean landmark distance under 0.3 palm = one hand detected twice.
+    - handedness must differ when MediaPipe is confident about both.
+    - far 6.0: palm centres more than 6 palms apart = probably two people's single
+      hands. Measured on real photos: one person's spread arms ✌️✌️ sit 4.5 palms
+      apart, two people's 🤘 side by side 4.4, so no distance separates them;
+      6 keeps every one-person pair and only rejects people at opposite edges.
+      ponytail: distance-only person split; a person mask/face count is the upgrade.
+    """
+    return _mean_lm_dist(a, b) >= dup and _opposite_or_unsure(a, b) and _palm_gap(a, b) <= far
 
 
 def pick(hands: list[Hand], min_score: float = 0.5) -> tuple[str | None, list[Hand]]:
     """Map the hands seen in one frame to (reaction candidate, the hands that decided it).
 
-    Precedence: two-hand reactions > single-hand. Hands whose canned label is below
-    `min_score` are treated as "None" for canned rules but still usable for the
-    landmark rules (heart, horns), which don't depend on the classifier.
+    Precedence: two-hand reactions > single-hand. Every pair of detected hands is
+    tried, closest first, so a third hand (another person) can't hide a real pair.
+    Within a pair, heart geometry decides first (the model has no heart class and
+    labelled heart hands Thumb_Down), then the same pose() on both hands. pose()
+    fuses label and geometry, so one hand at Thumb_Up:.49 no longer downgrades
+    fireworks to thumbs_up.
 
     The second element is what effects anchor on. Only this function knows which hand
     matched; returning every detected hand instead would pin a sprite over whichever
     hand MediaPipe happened to list first.
+
+    ponytail: two-hand recall at the live 16:9 framing is unmeasured. The 22-photo eval
+    runs mostly portrait photos; letterboxed into 16:9 (hands smaller in the palm
+    detector's square input), tu_two_b finds 1 of 2 hands (→ thumbs_up via the
+    one-hand fallback below) and v_double 0 of 2, at infer width 640, 960 and 1280
+    alike. A second detection pass on the centre-square crop recovered both (and
+    tu_two_a) on those letterboxes, but costs a second 17-24 ms inference whenever
+    fewer than 2 hands are tracked, and a letterbox overstates the shrink. Decide on
+    the user's --record-raw clip; tests/fixtures/photo_variants.json is the regression set.
     """
     if not hands:
         return None, []
-
-    def lab(h: Hand) -> str:
-        return h.label if h.score >= min_score else "None"
-
-    # A duplicate detection of ONE hand puts both wrists in the same place; a real
-    # two-hand pose never does. Without this floor, one thumbs-up reads as "hearts"
-    # (index tips ~0 apart, thumb tips ~0 apart, index above thumb — true of nearly
-    # any upright hand). 1.0 * max(size) is the knob: raise it if two genuinely
-    # adjacent hands still over-fire.
-    if len(hands) >= 2 and _d(hands[0].lm[WRIST], hands[1].lm[WRIST], hands[0].aspect) > max(hands[0].size, hands[1].size):
-        a, b = hands[0], hands[1]
-        la, lb = lab(a), lab(b)
-        # Canned labels first: let the trained classifier arbitrate where it has an
-        # opinion. Geometry only decides the two poses it has no class for. Running
-        # is_heart ahead of these made two adjacent Victory hands read as "hearts".
-        if la == lb == "Thumb_Up":
-            return "fireworks", [a, b]
-        if la == lb == "Thumb_Down":
-            return "rain", [a, b]
-        if la == lb == "Victory":
-            return "confetti", [a, b]
+    poses = [h.pose(min_score) for h in hands]
+    pairs = sorted(
+        ((i, j) for i in range(len(hands)) for j in range(i + 1, len(hands))),
+        key=lambda ij: _palm_gap(hands[ij[0]], hands[ij[1]]),
+    )
+    for i, j in pairs:
+        a, b = hands[i], hands[j]
+        if not pairable(a, b):
+            continue
         if is_heart(a, b):
             return "hearts", [a, b]
-        if a.is_horns() and b.is_horns():
-            return "lasers", [a, b]
+        if poses[i] == poses[j] and poses[i] in PAIR:
+            return PAIR[poses[i]], [a, b]
 
-    single = {"Thumb_Up": "thumbs_up", "Thumb_Down": "thumbs_down", "Victory": "balloons"}
-    # Rank only hands whose label maps to something. Hand.score is the score of the top
-    # canned class, and for a resting hand that class is "None" at 0.9+ — which would
-    # outrank a deliberate Thumb_Up@0.7 and swallow the whole frame.
-    best = max((h for h in hands if lab(h) in single), key=lambda h: h.score, default=None)
-    return (single[best.label], [best]) if best is not None else (None, [])
+    # Rank by "the model agrees" first, then its score. Hand.score is the score of the
+    # top canned class, and for a resting hand that's "None" at 0.9+ — ranking on it
+    # alone would let a geometry-only hand outrank a deliberate Thumb_Up@0.7.
+    cands = [(h, p) for h, p in zip(hands, poses, strict=True) if p in SINGLE]
+    if not cands:
+        return None, []
+    h, p = max(cands, key=lambda hp: (_CANNED_POSE.get(hp[0].label) == hp[1], hp[0].score))
+    return SINGLE[p], [h]
 
 
 def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
@@ -208,14 +370,47 @@ def reaction_for(hands: list[Hand], min_score: float = 0.5) -> str | None:
     return pick(hands, min_score)[0]
 
 
-class GestureRecognizer:
-    """MediaPipe GestureRecognizer in LIVE_STREAM mode, exposing only the latest result."""
+def hands_from_result(result, width: int, height: int) -> list[Hand]:
+    """MediaPipe GestureRecognizerResult → Hand list (top-1 canned label, x,y only)."""
+    hands: list[Hand] = []
+    for i, lms in enumerate(result.hand_landmarks or []):
+        gestures = result.gestures[i] if i < len(result.gestures) and result.gestures[i] else []
+        top = gestures[0] if gestures else None
+        handed = result.handedness[i][0] if i < len(result.handedness) and result.handedness[i] else None
+        hands.append(Hand(
+            label=(top.category_name if top else "None") or "None",
+            score=float(top.score) if top else 0.0,
+            handedness=handed.category_name if handed else "?",
+            lm=np.array([[l.x, l.y] for l in lms], dtype=np.float32),
+            aspect=width / height,
+            handed_score=float(handed.score) if handed else 0.0,
+        ))
+    return hands
 
-    def __init__(self, model_path: str | pathlib.Path, num_hands: int = 2, log=print):
+
+class GestureRecognizer:
+    """MediaPipe GestureRecognizer.
+
+    mode="live": LIVE_STREAM, submit()/latest(); the main loop never blocks on it.
+    mode="video": VIDEO, synchronous recognize(rgb, ts_ms) for offline eval. Same
+    tracker as live (hands found earlier stay tracked), unlike IMAGE mode.
+    """
+
+    def __init__(
+        self,
+        model_path: str | pathlib.Path,
+        num_hands: int = 2,
+        log=print,
+        detect_conf: float = 0.5,
+        track_conf: float = 0.5,
+        mode: str = "live",
+    ):
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
 
+        if mode not in ("live", "video"):
+            raise ValueError(f"mode must be 'live' or 'video', not {mode!r}")
         self._mp = mp
         self._lock = threading.Lock()
         self._latest: Observation | None = None
@@ -224,14 +419,15 @@ class GestureRecognizer:
         self._last_ts_ms = -1
         self._log = log
 
+        live = mode == "live"
         opts = vision.GestureRecognizerOptions(
             base_options=mp_python.BaseOptions(model_asset_path=str(model_path)),
-            running_mode=vision.RunningMode.LIVE_STREAM,
+            running_mode=vision.RunningMode.LIVE_STREAM if live else vision.RunningMode.VIDEO,
             num_hands=num_hands,
-            min_hand_detection_confidence=0.5,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
-            result_callback=self._on_result,
+            min_hand_detection_confidence=detect_conf,
+            min_hand_presence_confidence=track_conf,
+            min_tracking_confidence=track_conf,
+            result_callback=self._on_result if live else None,
         )
         self._rec = vision.GestureRecognizer.create_from_options(opts)
 
@@ -239,22 +435,9 @@ class GestureRecognizer:
     def _on_result(self, result, image, timestamp_ms: int) -> None:
         sent = self._pending.pop(timestamp_ms, None)
         now = time.monotonic()
-        hands: list[Hand] = []
-        for i, lms in enumerate(result.hand_landmarks or []):
-            gestures = result.gestures[i] if i < len(result.gestures) and result.gestures[i] else []
-            top = gestures[0] if gestures else None
-            handed = result.handedness[i][0].category_name if i < len(result.handedness) and result.handedness[i] else "?"
-            arr = np.array([[l.x, l.y] for l in lms], dtype=np.float32)
-            hands.append(Hand(
-                label=(top.category_name if top else "None") or "None",
-                score=float(top.score) if top else 0.0,
-                handedness=handed,
-                lm=arr,
-                aspect=image.width / image.height,
-            ))
         obs = Observation(
             ts=self._t0 + timestamp_ms / 1000.0,
-            hands=hands,
+            hands=hands_from_result(result, image.width, image.height),
             infer_ms=(now - sent) * 1000.0 if sent else 0.0,
         )
         with self._lock:
@@ -279,6 +462,20 @@ class GestureRecognizer:
                 self._pending.pop(k, None)
         self._rec.recognize_async(img, ts_ms)
         return True
+
+    def recognize(self, rgb: np.ndarray, ts_ms: int) -> Observation:
+        """mode="video" only: run one frame synchronously. ts_ms must strictly increase.
+
+        Observation.ts is ts_ms in seconds (the clip's clock, not monotonic()).
+        """
+        img = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+        t = time.monotonic()
+        result = self._rec.recognize_for_video(img, int(ts_ms))
+        return Observation(
+            ts=ts_ms / 1000.0,
+            hands=hands_from_result(result, img.width, img.height),
+            infer_ms=(time.monotonic() - t) * 1000.0,
+        )
 
     def latest(self) -> Observation | None:
         with self._lock:
