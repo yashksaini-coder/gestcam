@@ -91,8 +91,12 @@ def cmd_run(a) -> int:
                 # busy device must not take the others down with it.
                 print(f"[gestcam] skipping {d}: {e}")
         if a.out != "none" and not sinks:
-            raise RuntimeError("no virtual camera could be opened")
-        if a.preview or a.out == "none":
+            if a.out != "auto":
+                raise RuntimeError("no virtual camera could be opened")
+            # No loopback loaded: still useful as a local mirror, so fall back to a window.
+            print("[gestcam] no virtual camera (run scripts/loopback.sh to feed Discord/Zoom); "
+                  "showing a preview window instead")
+        if a.preview or not sinks:
             sinks.append(PreviewOutput())
         if a.record:
             sinks.append(FileOutput(a.record, w, h, fps))
