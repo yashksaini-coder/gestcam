@@ -9,14 +9,14 @@ On macOS, "Reactions" are not a Discord feature. They're an OS-level camera effe
 ```
 webcam ──V4L2 (MJPG)──▶ Capture thread ──newest frame──▶ main loop ──▶ v4l2loopback (/dev/video10, I420)
                                                             │   ▲                      │
-                                          rgb@640w ──▶ MediaPipe thread (LIVE_STREAM)  │
-                                                            │                          ▼
-                                          Observation ──▶ reaction_for() ──▶ ReactionState ──▶ EffectEngine
+                                          rgb@640w ──▶ MediaPipe threads (LIVE_STREAM) │
+                                                       gestures + person mask          ▼
+                     new Observation ──▶ decide(): pick() ──▶ ReactionState ──▶ EffectEngine (back | person | front)
                                                                                                    │
                                                                               Discord / Chromium / OBS / Zoom
 ```
 
-Modules: `streams.py` (capture + sinks) · `recognizer.py` (MediaPipe wrapper + pure gesture rules) · `state.py` (hold/cooldown) · `effects.py` (particles) · `pipeline.py` (loop, demo) · `doctor.py` (preflight) · `cli.py`.
+Modules: `streams.py` (capture + sinks) · `recognizer.py` (MediaPipe wrapper + pure gesture rules) · `segment.py` (person mask) · `state.py` (hold/cooldown) · `effects.py` (layered particles) · `pipeline.py` (loop, eval, demo) · `doctor.py` (preflight) · `cli.py`.
 
 ## Decisions and why
 
@@ -29,7 +29,12 @@ Modules: `streams.py` (capture + sinks) · `recognizer.py` (MediaPipe wrapper + 
 | **LIVE_STREAM mode, newest-result-wins** | Model latency never blocks the frame loop. If inference falls behind, output stays 30 fps and reactions lag ~50 ms, which nobody notices. |
 | **Inference at 640 px wide** | Hand landmarker resizes to 224 internally; feeding 1280 just costs a bigger copy. Landmarks are normalized, so effects still render at full resolution. |
 | **Time-based hold (0.7 s) + cooldown (2.5 s) + release-to-repeat** | Same feel as Apple's "hold and pause". Frame-count debouncing breaks the moment fps changes. |
-| **Opaque OpenCV primitives, ROI alpha only for sprites** | Full-frame float alpha blend ≈ 10–15 ms at 720p. Measured: all 8 effects at once ≈ 10 ms on a 2.1 GHz Xeon; any single effect ≤ 2 ms. |
+| ~~**Opaque OpenCV primitives, ROI alpha only for sprites**~~ → **layered compositing in uint8 cv2** | **Superseded.** The ban was right about numpy float (mask blend 18.9 ms at 720p) and wrong about native uint8 cv2: `addWeighted` 0.5 ms, `blendLinear` mask composite ~2.3 ms in a real frame, half-res blurred glow 0.8–1.8 ms. So effects now have back / front / light passes: back is drawn on a copy and blended *under* the person, front over them, and fades are alpha, never darkening to black. `step()` cost with a mask, mean/p95: single effects 0.4–5.3 / ≤6.1 ms, all 8 at once 8.4 / 10.7 ms (idle machine; command and load not recorded). Under load ~9–15 on 16 cores, `scratchpad/build_effects/perf.py` measured masked step() means of 17–25 ms for single effects and 36.2 / 49.4 ms mean/p95 for all 8, against 4–10 ms unmasked. That is why the segmentation auto-off also watches the loop time of masked frames. |
+| **Per-hand pose = canned label fused with landmark geometry** | The canned top-1 label missed 4 of 6 clear ✌️ (None:.96 on a textbook V), and MediaPipe 0.10 returns no runner-up. Geometry (V, horns, thumb tip as the hand's extreme point) votes unless the model is ≥0.7 sure of a *different* named class; horns and heart geometry outrank labels (the model has neither class and called horns "Victory", hearts "Thumb_Down"). 22 Commons photos: 4/20 → 11/20 in IMAGE mode, 0 wrong-reaction fires; landmarks are pinned as `tests/fixtures/photo_hands.json`. |
+| **Pairing by landmark distance + handedness, not a wrist floor** | "Wrists > 1 palm apart" rejected real thumbs held together and still let a duplicate box through. Now: mean distance over all 21 landmarks < 0.3 palm = the same hand twice; Left+Left / Right+Right rejected only when both handedness scores ≥ 0.8 (`--mirror` flips both, so "they differ" survives it); every pair tried closest-first so a third hand can't hide one. Palms > 6 apart don't pair. `ponytail:` one person's spread arms (4.5 palms) and two people side by side (4.4) overlap, so distance can't split people. |
+| **Per-reaction hold accumulators, fed once per observation** | Replaced an incumbent/challenger rule that double-fired 👍 then 👍👍 (thumbs_up, then fireworks 2.5 s later) and let a 50/50 thumbs_up/fireworks flicker always resolve to thumbs_up. Each reaction accrues dt while seen, freezes for `grace_s`, decays at 2·dt. **Promotion**: a seen superset takes max(own, subset's) so fireworks fires 0.7 s after the *first* thumb. **Deferral**: with 2+ hands in frame a subset needs +`defer_s` (0.15 s). **Upgrade**: after a subset fires, its superset may still fire inside the cooldown and the effect engine retires the bubble. Cooldown holds every accumulator at 0, so every fire follows a visible ring. Clocked on `Observation.ts`, once per new observation: per-frame wall-clock feeding made hold length depend on model latency. Fire times identical at 10/30/60 Hz. |
+| **Selfie segmenter for "behind the person"** | Google's `selfie_segmenter.tflite` (Apache-2.0, 250 KB) through the same Tasks API, LIVE_STREAM on its own thread, fed the same 640 px RGB as the gesture model. 4.7–5.4 ms p50 alone; both models together keep gesture p95 under 33 ms (it costs the gesture model ~1.5 ms of p95). The mask is dilated 1.2% of height (one frame of lag) and smoothed asymmetrically: growth immediate, shrink EMA, so an effect is never painted over a pixel the person just moved into. Auto-off for the session if either model's p95, or the loop p95 of masked frames, is > 33 ms for two 5 s windows. Runs only while a hold or effect is up (the only mask readers): idle, it cost ~0.5 core. |
+| **No Apple code to port: Reactions live in AVFoundation, not the app** | Discord 0.0.419 (Discord.dmg) contains no gesture code. Its Chromium only *logs* `AVCaptureDevice.reactionEffectsEnabled` / `reactionEffectGesturesEnabled` (`media/capture/video/mac/video_capture_metrics_mac.mm`). The recognition and effects are Apple's, closed, inside the camera stack; gestcam copies the public behaviour (support.apple.com/105117, WWDC23 10105), not code or assets. |
 | ~~**mediapipe ≥ 1.0**~~ → **mediapipe < 1.0**, pinned | **Superseded.** 1.0.1 SIGKILLs the process on its first inference on this machine — reproduced with no camera, no virtual camera and no gestcam code, on a single static frame, in all three running modes. Not OOM (peak RSS 251 MB, 12 GB free, no cgroup limit), no coredump, no seccomp/audit trace, `RLIMIT_RTTIME` already unlimited. 0.10.x runs the same model fine. The ABI-agnostic wheel was only insurance against a bleeding-edge interpreter, which `uv python pin 3.12` retires. |
 | **Two loopback devices, not one** | One v4l2loopback device serves exactly **one streaming consumer**: `VIDIOC_REQBUFS` returns `-EBUSY` to the second capture client, while `max_openers=10` gates only `open()` — so the second app opens the device and then shows black. Measured both ways round (native Discord holding it, then Brave holding it). `video_nr`/`card_label`/`exclusive_caps` are per-device arrays, so all three must be comma lists or the second device comes up invisible to Chromium. |
 | **`uv` + `pyproject.toml`** | Isolated from system Python; `uv python pin 3.12` is the escape hatch if a wheel is missing for a bleeding-edge interpreter. |
@@ -64,7 +69,7 @@ Not risks: Hyprland/Wayland itself (V4L2 doesn't go through the compositor); mir
 ## Data to collect on the first run
 
 1. `uv run gestcam doctor --json > doctor.json`
-2. `uv run gestcam run --record first.mp4` for ~1 min: do each gesture twice, talk with your hands for 20 s (false-positive test). Note the `[gestcam] out … fps | infer p50/p95` lines.
+2. `uv run gestcam run --record-raw first.mp4` for ~2 min: each gesture twice, two-hand ones one hand at a time, and 20 s of talking with your hands (false-positive test). Then `uv run gestcam eval first.mp4`. Note the `[gestcam] out … fps | infer … | seg …` lines.
 3. Whether Discord lists **GestCam** with gestcam running, and what `v4l2-ctl -d /dev/video10 --list-formats-ext` says while it runs.
 4. `wpctl status | sed -n '/Video/,$p'` — does the loopback show up as a PipeWire node?
 
@@ -87,3 +92,12 @@ Not risks: Hyprland/Wayland itself (V4L2 doesn't go through the compositor); mir
   apart, so at most two overlap: measured worst case 12.5 ms.
 - Seven classifier bugs found and fixed by reproduction, the largest being that a held
   gesture could fire **never** under label flicker (10 s of holding, zero triggers).
+- The full loop (gesture model + segmenter + all 8 effects in rotation + compositing +
+  I420 conversion) on a 1280x720 file in place of the webcam: **30 fps** out, loop p50/p95
+  10.8/14.2 ms with the mask (5.1/7.9 without), gesture infer 16.9/23.9 ms, segmenter
+  7.9/10.8 ms. The live loop and `gestcam eval` fired the identical 4 reactions at the
+  same clip times, which is the check that both share one decision path.
+- `gestcam eval` on the 22 photos as 1.2 s stills (VIDEO mode, tracking on): 11 fire,
+  10 correct + 1 one-hand subset, 0 wrong. One photo the single-frame run got
+  (td_videocall) is lost once the tracker re-crops: frame 0 reads thumb_down, frame 1
+  Closed_Fist. Live tracking can cut both ways; only a real recording will say which.
