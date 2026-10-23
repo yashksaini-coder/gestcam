@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Ruff
+        run: uvx ruff check --output-format=github .
+      - name: Lockfile matches pyproject
+        run: uv lock --check
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # opencv-contrib-python and mediapipe link against libGL / glib even headless.
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+      - name: Install
+        run: uv sync --locked --extra dev
+      # The model-backed tests skip when the models aren't cached; cache them so CI
+      # runs real MediaPipe inference instead of silently skipping it.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/gestcam
+          key: gestcam-models-v1
+      - name: Fetch models
+        run: uv run python -c "from gestcam.recognizer import ensure_model; from gestcam.segment import ensure_segmenter; ensure_model(); ensure_segmenter()"
+      - name: Tests
+        run: uv run pytest -q -rs
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Check metadata
+        run: uvx twine check --strict dist/*
+      # Install the built wheel into a clean venv, outside the source tree, and render
+      # the demo: proves the entry point works and the emoji assets made it into the wheel.
+      - name: Smoke-test the wheel
+        run: |
+          uv venv /tmp/smoke --python 3.12
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          cd /tmp
+          /tmp/smoke/bin/gestcam --help
+          /tmp/smoke/bin/gestcam demo --out /tmp/demo.mp4 --seconds 2
+          test -s /tmp/demo.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

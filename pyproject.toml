@@ -40,3 +40,12 @@ packages = ["gestcam"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+# Pinned here so CI and every machine lint the same rules (no user-level ruff config).
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B"]
+# House style: `l` for landmark lists, `a; b` for tiny paired test setups.
+ignore = ["E741", "E702"]
