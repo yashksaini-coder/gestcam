@@ -1,0 +1,58 @@
+name: Release
+
+# Push a tag like v0.1.0 (matching pyproject.toml) to publish that version to PyPI.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the package version
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          py=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          init=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' gestcam/__init__.py)
+          echo "tag=$want pyproject=$py __init__=$init"
+          [ "$want" = "$py" ] && [ "$want" = "$init" ]
+
+  ci:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  pypi:
+    needs: ci
+    runs-on: ubuntu-latest
+    # Trusted publishing: PyPI trusts this repo + workflow + environment, so no token is stored.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/gestcam/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* docs/img/demo.gif --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

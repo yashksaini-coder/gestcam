@@ -33,12 +33,16 @@ gestcam run                    # pick "GestCam" as the camera in Discord / Zoom 
    - finish by running `doctor`
 
    It should show every root command before running it, and `--dry-run` should only print them.
-2. **Release workflow** (`.github/workflows/release.yml`). On tag `v*`:
-   - reuse the CI build job
-   - publish to PyPI with **trusted publishing** (OIDC, so no API token is stored)
-   - create a GitHub Release with the wheel, the sdist and the demo GIF attached
+2. **Release workflow** (done: `.github/workflows/release.yml`). On tag `v*` it:
+   - fails unless the tag matches `version` in `pyproject.toml` and `gestcam/__init__.py`
+   - runs the whole CI workflow (lint, tests on 3.11–3.14, build + wheel smoke test)
+   - publishes that exact `dist` artifact to PyPI with **trusted publishing** (OIDC, no stored token)
+   - creates a GitHub Release with the wheel, the sdist and the demo GIF attached
 
-   Bump the version by hand in `pyproject.toml`. That's enough until releases get frequent; then switch to hatch-vcs.
+   One-time setup on PyPI, before the first tag: *Your projects → Publishing → Add a pending
+   publisher*, with owner `yashksaini-coder`, repo `gestcam`, workflow `release.yml`, environment `pypi`.
+   To release: bump both version strings, commit, then `git tag v0.1.0 && git push origin v0.1.0`.
+   Switch to hatch-vcs once releases get frequent.
 3. **README install section.** Add the three commands above, plus a "supported" line and
    a short troubleshooting table that `doctor` already backs.
 4. **Autostart (optional).** `gestcam setup --autostart` installs a systemd *user* unit
