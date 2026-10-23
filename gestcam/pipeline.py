@@ -53,6 +53,7 @@ class RunConfig:
     stale_s: float = 0.4  # ignore observations older than this (model hiccup)
     model: str | None = None
     segment: bool = True  # person mask so back-layer effects go behind you
+    background: str | None = None  # "remove" | "blur" | image path; needs segment
     debug: bool = False  # landmarks, poses, decision, hold accumulators on the output
     record_raw: str | None = None  # .mp4 of the frames the model saw, pre-effects
     stats_every_s: float = 5.0
@@ -153,10 +154,33 @@ def decide(obs: Observation, state: ReactionState, w: int, h: int, min_score: fl
     return Decision(candidate, used, anchors_px(used, w, h), fired)
 
 
+BLUR = np.zeros(0, np.uint8)  # sentinel: the background is the frame itself, blurred
+BG_GREY = (40, 40, 40)  # BGR, "remove": flat dark grey, quiet behind any effect
+
+
+def background_image(spec: str, w: int, h: int) -> np.ndarray:
+    """--bg value → BGR w x h image (or BLUR)."""
+    if spec == "remove":
+        return np.full((h, w, 3), BG_GREY, np.uint8)
+    if spec == "blur":
+        return BLUR
+    img = cv2.imread(spec)
+    if img is None:
+        raise RuntimeError(f"--bg: can't read image {spec!r}")
+    return cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+
+
+def blur_frame(frame: np.ndarray) -> np.ndarray:
+    # Blur at 1/8 size and upsample: same look as a big full-res kernel, ~1 ms.
+    h, w = frame.shape[:2]
+    small = cv2.resize(frame, (w // 8, h // 8), interpolation=cv2.INTER_AREA)
+    return cv2.resize(cv2.GaussianBlur(small, (0, 0), 2.5), (w, h))
+
+
 def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None:
     """`make_sink(width, height, fps)` is called once the camera has negotiated its
     real format, so sinks never guess the frame size."""
-    from .segment import PersonSegmenter, ensure_segmenter, refine_mask
+    from .segment import PersonSegmenter, ensure_segmenter, refine_mask, replace_background
     from .sprites import load_sprites
     from .streams import Capture, FileOutput
 
@@ -178,6 +202,10 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
             seg = PersonSegmenter(ensure_segmenter(log=log), log=log)
         except Exception as e:
             log(f"[gestcam] segmentation off: {e}")
+    if cfg.background and seg is None:
+        raise RuntimeError("--bg needs the person segmenter, which failed to start")
+    bg = background_image(cfg.background, W, H) if cfg.background else None
+    bg_small: np.ndarray | None = None  # latest raw model mask; never cleared, see below
     engine = EffectEngine(W, H, sprites=load_sprites(log=log))
     state = make_state(cfg)
     stats = Stats()
@@ -208,7 +236,9 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
             # effect up in 12% of frames (review/perf/idle_cost.py), and starved the
             # gesture model. A hold takes >= hold_s (0.7 s) and a mask arrives ~10 ms
             # after submit, so it is warm long before anything fires.
-            want_mask = seg is not None and (state.current is not None or engine.busy)
+            want_mask = seg is not None and (
+                bg is not None or state.current is not None or engine.busy
+            )
 
             if stats.frames % cfg.infer_every == 0:
                 rgb = model_rgb(frame, cfg.infer_width)
@@ -242,11 +272,24 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
                 got_mask = seg.latest()
                 if got_mask is not None and got_mask[0] != last_seg_ts:
                     last_seg_ts = got_mask[0]
+                    bg_small = got_mask[1]
                     stats.seg_ms.append(seg.latency_ms)
                     # refined per new mask; prev smoothing hides the mask's frame of lag
                     mask = refine_mask(got_mask[1], W, H, mask)
                 if now - last_seg_ts > cfg.stale_s:
                     mask = None  # an old silhouette misplaces effects worse than none
+
+            if bg is not None:
+                # Before the effects, so back-layer effects land on the new background.
+                # Until the first mask arrives the whole frame is background: showing
+                # the room for a moment is the leak --bg exists to prevent. A stale mask
+                # is kept for the same reason.
+                if bg_small is None:
+                    frame[:] = bg if bg is not BLUR else blur_frame(frame)
+                else:
+                    replace_background(
+                        frame, bg_small, blur_frame(frame) if bg is BLUR else bg
+                    )
 
             hold = None
             # Ring follows the state machine, not the per-frame candidate. The hold
@@ -290,7 +333,7 @@ def run(cfg: RunConfig, make_sink, log=print, should_stop=lambda: False) -> None
                 stats.mask_loop_ms.append(stats.loop_ms[-1])
             if now - stats.last_print >= cfg.stats_every_s:
                 log(stats.line())
-                if seg is not None:
+                if seg is not None and bg is None:  # --bg can't fall back to no mask
                     overload = overload_streak(
                         overload, stats.infer_ms, stats.seg_ms, stats.mask_loop_ms
                     )

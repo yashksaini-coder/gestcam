@@ -79,6 +79,20 @@ def refine_mask(small: np.ndarray, w: int, h: int, prev: np.ndarray | None = Non
     return cv2.max(m, ema)
 
 
+def replace_background(frame: np.ndarray, small: np.ndarray, bg: np.ndarray) -> None:
+    """In place: keep the person (model mask, 255 = person), swap the rest for `bg`.
+
+    No dilation, unlike refine_mask: there a fat mask hides effects safely, here it
+    would leave a halo of the real room around the person, which is what this hides.
+    """
+    h, w = frame.shape[:2]
+    a = cv2.resize(cv2.GaussianBlur(small, (0, 0), 1.0), (w, h), interpolation=cv2.INTER_LINEAR)
+    a = cv2.merge([a, a, a])
+    # bg + (frame - bg) * a, in uint8 via two multiplies (no float HxWx3 temporaries)
+    frame[:] = cv2.add(cv2.multiply(frame, a, scale=1 / 255),
+                       cv2.multiply(bg, cv2.bitwise_not(a), scale=1 / 255))
+
+
 def _to_u8(result) -> np.ndarray:
     # Confidence in [0,1] float32 → uint8. convertScaleAbs saturates and copies, so the
     # array no longer aliases MediaPipe's buffer once the callback returns.

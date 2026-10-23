@@ -141,3 +141,16 @@ def test_real_photo_person_is_255():
     assert (centre >= 128).mean() > 0.9 and np.median(centre) == 255
     assert corners.mean() < 32
 
+
+def test_replace_background_keeps_person_swaps_rest():
+    import numpy as np
+
+    from gestcam.segment import replace_background
+
+    frame = np.full((72, 128, 3), 200, np.uint8)
+    small = np.zeros((36, 64), np.uint8)
+    small[:, :32] = 255  # left half is the person
+    bg = np.full_like(frame, 40)
+    replace_background(frame, small, bg)
+    assert frame[36, 10].tolist() == [200] * 3  # person untouched
+    assert frame[36, 120].tolist() == [40] * 3  # room replaced

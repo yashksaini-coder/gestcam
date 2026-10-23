@@ -48,6 +48,8 @@ def _add_run_opts(p: argparse.ArgumentParser):
     p.add_argument("--record", default=None, help="also write output to this .mp4")
     p.add_argument("--record-raw", default=None,
                    help="also write the frames the model sees (mirrored if --mirror, no effects) to this .mp4, for `gestcam eval`")
+    p.add_argument("--bg", default=None, metavar="remove|blur|IMAGE",
+                   help="replace the background behind you: flat grey, blurred, or an image")
     p.add_argument("--no-segment", action="store_true",
                    help="no person mask: every effect is drawn over you (saves ~5 ms of model CPU)")
     p.add_argument("--debug", action="store_true",
@@ -79,7 +81,7 @@ def cmd_run(a) -> int:
 
     cfg = RunConfig(device=_dev(a.device), width=a.width, height=a.height, fps=a.fps, mjpg=not a.no_mjpg,
                     mirror=a.mirror, infer_every=a.infer_every, hold_ring=not a.no_hold_ring,
-                    segment=not a.no_segment, debug=a.debug, record_raw=a.record_raw, **_model_cfg(a))
+                    segment=not a.no_segment, background=a.bg, debug=a.debug, record_raw=a.record_raw, **_model_cfg(a))
     def make_sink(w, h, fps):
         sinks = []
         for d in _out_devices(a.out, gestcam_devices()):
