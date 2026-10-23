@@ -22,7 +22,8 @@ gestcam run                    # pick "GestCam" as the camera in Discord / Zoom 
 
 ## Steps
 
-1. **`gestcam setup` subcommand.** Move what `scripts/loopback.sh` does into the
+1. **`gestcam setup` subcommand** (done: runs the packaged `gestcam/loopback.sh`, fetches
+   both models, runs doctor; `--show` prints the script). Original intent: move what `scripts/loopback.sh` does into the
    package, because a PyPI install doesn't include `scripts/`. The command should:
    - detect the distro
    - print or run the install line (`pacman -S v4l2loopback-dkms`, `apt install v4l2loopback-dkms`, `dnf install v4l2loopback`)

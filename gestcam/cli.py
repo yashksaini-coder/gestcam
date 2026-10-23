@@ -1,5 +1,6 @@
 """gestcam command line.
 
+  gestcam setup [--show | --models-only]      one-time: virtual cameras (sudo) + models
   gestcam doctor [--json] [--no-probe]        preflight: what will/won't work here, with fixes
   gestcam run [options]                       webcam → gestures → reactions → virtual camera
   gestcam demo [--out demo.mp4 | --preview]   render every reaction on a synthetic scene
@@ -10,7 +11,9 @@
 from __future__ import annotations
 
 import argparse
+import pathlib
 import signal
+import subprocess
 import sys
 
 
@@ -96,7 +99,7 @@ def cmd_run(a) -> int:
             if a.out != "auto":
                 raise RuntimeError("no virtual camera could be opened")
             # No loopback loaded: still useful as a local mirror, so fall back to a window.
-            print("[gestcam] no virtual camera (run scripts/loopback.sh to feed Discord/Zoom); "
+            print("[gestcam] no virtual camera (run `gestcam setup` to feed Discord/Zoom); "
                   "showing a preview window instead")
         if a.preview or not sinks:
             sinks.append(PreviewOutput())
@@ -152,9 +155,39 @@ def cmd_cameras(_a) -> int:
     return 0
 
 
+LOOPBACK_SH = pathlib.Path(__file__).with_name("loopback.sh")
+
+
+def cmd_setup(a) -> int:
+    """Virtual cameras via loopback.sh (it calls sudo itself), both models, then doctor."""
+    if a.show:
+        print(LOOPBACK_SH.read_text())
+        return 0
+    if not a.models_only:
+        if not sys.platform.startswith("linux"):
+            print("[gestcam] setup: v4l2loopback is Linux-only; use --models-only")
+            return 1
+        print(f"[gestcam] installing v4l2loopback and loading the GestCam cameras; sudo will ask.\n"
+              f"[gestcam] review first with: gestcam setup --show   ({LOOPBACK_SH})")
+        if subprocess.run(["bash", str(LOOPBACK_SH)]).returncode:
+            print("[gestcam] setup: loopback step failed, see above")
+            return 1
+    from .recognizer import ensure_model
+    from .segment import ensure_segmenter
+    ensure_model()  # first `run` would otherwise stall on the 8 MB download
+    ensure_segmenter()
+    from .doctor import run_doctor
+    return run_doctor(probe=False)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="gestcam", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("setup", help="one-time: install/load the virtual cameras (sudo) and fetch the models")
+    p.add_argument("--show", action="store_true", help="print the root script setup runs, and exit")
+    p.add_argument("--models-only", action="store_true", help="skip the virtual cameras, just fetch the models")
+    p.set_defaults(fn=cmd_setup)
 
     p = sub.add_parser("doctor", help="preflight diagnostics")
     p.add_argument("--json", action="store_true")

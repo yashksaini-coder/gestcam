@@ -38,7 +38,8 @@ uv run gestcam doctor         # read this before anything else
 ## One-time: virtual camera device
 
 ```sh
-./scripts/loopback.sh         # installs v4l2loopback-dkms + headers, loads TWO devices, persists
+uv run gestcam setup          # installs v4l2loopback-dkms + headers, loads TWO devices, persists, fetches models
+uv run gestcam setup --show   # read the root script first, if you like
 ```
 
 You get **GestCam** on `/dev/video10` and **GestCam2** on `/dev/video11`. gestcam
@@ -49,7 +50,7 @@ The second app to start gets `Device or resource busy` (`VIDIOC_REQBUFS` → `EB
 shows black — `open()` succeeds, which is why it looks like the app "can't see" the
 camera when it is listed the whole time. So: point the native Discord app at GestCam and
 Discord in your browser at GestCam2. Need a third app? Add a third `video_nr`/label to
-`MODOPTS` in `scripts/loopback.sh`.
+`MODOPTS` (`MODOPTS="video_nr=10,11,12 card_label=GestCam,GestCam2,GestCam3 exclusive_caps=1,1,1" gestcam setup`).
 
 `exclusive_caps=1` is not optional either: Chromium-based apps (Discord web, Chrome,
 Electron) hide loopback devices without it. It is a **per-device array** — a bare

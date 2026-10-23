@@ -326,6 +326,7 @@ def fixes(r: Report) -> str:
     fed = "fedora" in distro
     lines = ["", "Fixes / setup commands (copy-paste, review first):"]
     if not r.data.get("v4l2loopback.installed", {}).get("installed"):
+        lines.append("  gestcam setup   # does all of the below in one go (gestcam setup --show to read it)")
         if arch:
             lines.append("  sudo pacman -S --needed linux-headers v4l2loopback-dkms v4l-utils   # use linux-zen-headers etc. if you run another kernel")
         elif deb:

@@ -72,6 +72,7 @@ jobs:
           uv pip install --python /tmp/smoke/bin/python dist/*.whl
           cd /tmp
           /tmp/smoke/bin/gestcam --help
+          /tmp/smoke/bin/gestcam setup --show | grep -q modprobe
           /tmp/smoke/bin/gestcam demo --out /tmp/demo.mp4 --seconds 2
           test -s /tmp/demo.mp4
       - uses: actions/upload-artifact@v4
