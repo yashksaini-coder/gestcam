@@ -15,7 +15,7 @@ gestcam run                    # pick "GestCam" as the camera in Discord / Zoom 
 |---|---|
 | The virtual camera is a **kernel module** (v4l2loopback). pip can't install it, and Flatpak/Snap/AppImage sandboxes can't load it. | Ship the app through PyPI. The module comes from the distro (`v4l2loopback-dkms`), and `gestcam setup` drives that step. |
 | mediapipe 0.10.x ships Linux wheels for **x86_64 only** (manylinux_2_28, so glibc 2.28 or newer). There is no aarch64 Linux wheel. | Supported platform: x86_64 Linux, glibc ≥ 2.28 (Ubuntu 20.04+, Fedora 29+, Debian 10+, Arch). Say so in the README and doctor, rather than failing at import. |
-| 0.10.21 wheels are cp39–cp312. 0.10.30+ are `py3` (any Python). We pin `<1.0` because 1.0.1 SIGKILLs. | Leave the pin as is. uv/pipx pick a working Python automatically. CI tests 3.11 and 3.12. |
+| 0.10.21 wheels are cp39–cp312. 0.10.30+ are `py3` (any Python). We pin `<1.0` because 1.0.1 SIGKILLs. | Leave the pin as is. The lock resolves 0.10.35, so 3.11–3.14 all work (tested 2026-10-23: full suite green on each). CI tests all four. |
 | The models (gesture 8 MB, segmenter 250 KB, Apache-2.0) are downloaded on first run to `~/.cache/gestcam`. | Don't bundle them: the wheel stays small and they aren't redistributed. `gestcam setup` pre-fetches them so the first `run` doesn't stall. |
 | The wheel is pure Python and includes the Noto emoji assets. CI already builds it and smoke-tests `gestcam demo` from a clean venv. | Nothing to compile per platform: one wheel and one sdist per release. |
 | The name `gestcam` is free on PyPI (404 today). | Claim it with the first release. |
